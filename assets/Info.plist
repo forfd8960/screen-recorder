@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required: shown in the macOS Screen Recording permission dialog. -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Screen Recorder needs access to capture your screen in order to record video.</string>
+
+    <!-- Required when capture_mic is enabled: shown in the Microphone permission dialog. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Screen Recorder needs microphone access to include your narration in the recording.</string>
+
+    <!-- Application identity -->
+    <key>CFBundleIdentifier</key>
+    <string>com.forfd8960.screen-recorder</string>
+
+    <key>CFBundleName</key>
+    <string>Screen Recorder</string>
+
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <!-- Minimum macOS version: ScreenCaptureKit requires 12.3+ -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.3</string>
+</dict>
+</plist>

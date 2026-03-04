@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Treat all Rust warnings as errors in CI.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  ci:
+    name: Build & Test (macOS)
+    runs-on: macos-14          # Apple Silicon; required for screencapturekit + objc2 frameworks
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Toolchain – read from rust-toolchain.toml (stable)
+      # -----------------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # -----------------------------------------------------------------------
+      # 3. Cache – cargo registry + build artefacts
+      # -----------------------------------------------------------------------
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # -----------------------------------------------------------------------
+      # 4. Format check
+      # -----------------------------------------------------------------------
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      # -----------------------------------------------------------------------
+      # 5. Lint
+      # -----------------------------------------------------------------------
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # -----------------------------------------------------------------------
+      # 6. Tests
+      # -----------------------------------------------------------------------
+      - name: cargo test
+        run: cargo test --all-targets
+        # TCC-gated integration tests are skipped automatically
+        # (they are annotated with #[cfg_attr(not(feature="integration"), ignore)])
+
+      # -----------------------------------------------------------------------
+      # 7. Release build
+      # -----------------------------------------------------------------------
+      - name: cargo build --release
+        run: cargo build --release
+
+      # -----------------------------------------------------------------------
+      # 8. Security & license audits (install tools first)
+      # -----------------------------------------------------------------------
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit

@@ -2,5 +2,67 @@
 name = "screen-recorder"
 version = "0.1.0"
 edition = "2024"
+description = "A macOS screen recorder built with Rust and ScreenCaptureKit"
+repository = "https://github.com/forfd8960/screen-recorder"
 
+# macOS deployment target – screencapturekit requires macOS 12.3+
+[package.metadata]
+macos_minimum_system_version = "12.3"
+
+# ---------------------------------------------------------------------------
+# Runtime dependencies
+# ---------------------------------------------------------------------------
 [dependencies]
+
+# --- macOS native / Apple frameworks ---
+# NOTE: version numbers were verified against crates.io on 2026-03-04.
+# The tech spec listed lower versions; these are the actual latest releases.
+screencapturekit    = "1"          # was spec "0.3"; current latest: 1.5.1
+objc2               = "0.6"        # was spec "0.5"; current latest: 0.6.4
+objc2-av-foundation = "0.3"        # was spec "0.2"; current latest: 0.3.2
+objc2-core-media    = "0.3"        # was spec "0.2"; current latest: 0.3.2
+core-foundation     = "0.10"       # current: 0.10.1
+core-graphics       = "0.25"       # was spec "0.24"; current: 0.25.0
+
+# --- UI ---
+eframe = "0.33"                    # was spec "0.27"; current: 0.33.3
+egui   = "0.33"                    # was spec "0.27"; current: 0.33.x
+rfd    = "0.17"                    # was spec "0.14"; current: 0.17.2
+
+# --- Async runtime ---
+tokio = { version = "1", features = ["full"] }
+
+# --- Error handling ---
+thiserror = "2"
+anyhow    = "1"
+
+# --- Serialization ---
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Observability ---
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- Utilities ---
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"                         # was spec "5"; current: 6.0.0
+
+# ---------------------------------------------------------------------------
+# Dev / test dependencies
+# ---------------------------------------------------------------------------
+[dev-dependencies]
+rstest  = "0.18"
+mockall = "0.12"
+
+# ---------------------------------------------------------------------------
+# Build profiles
+# ---------------------------------------------------------------------------
+[profile.dev]
+incremental = true
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = true
+opt-level     = 3
