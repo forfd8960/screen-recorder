@@ -28,12 +28,12 @@ use std::path::PathBuf;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
-    AVAssetWriter, AVAssetWriterInput, AVFileTypeMPEG4, AVMediaTypeAudio, AVMediaTypeVideo,
-    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264,
-    AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoWidthKey,
+    AVAssetWriter, AVAssetWriterInput, AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey,
+    AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoHeightKey,
+    AVVideoWidthKey,
 };
 use objc2_core_media::{CMSampleBuffer as ObjcCMSampleBuffer, CMTime, CMTimeFlags};
-use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL, ns_string};
+use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -148,11 +148,6 @@ fn run_encoding_thread(
     height: u32,
     bitrate: u32,
 ) -> Result<PathBuf, AppError> {
-    // SAFETY: All AVFoundation objects are created and used exclusively on
-    // this thread. `spawn_blocking` guarantees a dedicated OS thread.
-    // `CMSampleBuffer` type coercions use the toll-free bridge between
-    // CMSampleBufferRef (screencapturekit) and the ObjC CMSampleBuffer class
-    // (objc2-core-media). Both wrappers point to the same underlying CF object.
     unsafe {
         // ---------------------------------------------------------------- //
         // 1.  Output URL                                                    //
@@ -161,13 +156,11 @@ fn run_encoding_thread(
             .to_str()
             .ok_or_else(|| AppError::EncodingError("output path contains invalid UTF-8".into()))?;
         let ns_path = NSString::from_str(path_str);
-        // SAFETY: NSURL::fileURLWithPath is a class method returning a valid URL for UTF-8 paths.
         let url = NSURL::fileURLWithPath(&ns_path);
 
         // ---------------------------------------------------------------- //
         // 2.  AVAssetWriter                                                 //
         // ---------------------------------------------------------------- //
-        // SAFETY: AVFileTypeMPEG4 is a non-null static NSString guaranteed by the SDK.
         let file_type = AVFileTypeMPEG4.expect("AVFileTypeMPEG4 must exist");
         let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type)
             .map_err(|e| AppError::EncodingError(format!("AVAssetWriter init failed: {e:?}")))?;
@@ -176,7 +169,6 @@ fn run_encoding_thread(
         // 3.  Video input (H.264)                                          //
         // ---------------------------------------------------------------- //
         let video_settings = build_video_settings(width, height, bitrate);
-        // SAFETY: AVMediaTypeVideo is a non-null static NSString.
         let media_video = AVMediaTypeVideo.expect("AVMediaTypeVideo must exist");
         let video_input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
             media_video,
@@ -185,19 +177,23 @@ fn run_encoding_thread(
         video_input.setExpectsMediaDataInRealTime(true);
 
         // ---------------------------------------------------------------- //
-        // 4.  Audio input (AAC 48 kHz stereo 128 kbps)                    //
+        // 4.  Audio NOTE — not added to writer in this phase.
+        //
+        //     ScreenCaptureKit delivers audio as LPCM Float32 Non-Interleaved.
+        //     AVAssetWriterInput for AAC compression requires interleaved input
+        //     or a specific format description that matches the encoder's
+        //     expectations.  Passing the SCKit CMSampleBuffer directly to
+        //     appendSampleBuffer throws NSInvalidArgumentException.
+        //
+        //     Using outputSettings=nil (passthrough) also fails because the MP4
+        //     container does not support raw LPCM audio tracks.
+        //
+        //     Proper LPCM→AAC conversion via AudioConverter will be implemented
+        //     in Phase 8.  Until then, the encoder is video-only and audio
+        //     buffers received from the capture engine are drained and discarded.
         // ---------------------------------------------------------------- //
-        let audio_settings = build_audio_settings();
-        // SAFETY: AVMediaTypeAudio is a non-null static NSString.
-        let media_audio = AVMediaTypeAudio.expect("AVMediaTypeAudio must exist");
-        let audio_input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
-            media_audio,
-            Some(&*audio_settings),
-        );
-        audio_input.setExpectsMediaDataInRealTime(true);
-
         writer.addInput(&video_input);
-        writer.addInput(&audio_input);
+        // NOTE: audio input not added — see Phase 8 comment above.
 
         // ---------------------------------------------------------------- //
         // 5.  Start writing session at time zero                          //
@@ -208,7 +204,6 @@ fn run_encoding_thread(
             ));
         }
 
-        // kCMTimeZero: value=0, timescale=1, flags=kCMTimeFlags_Valid(1), epoch=0
         let time_zero = CMTime {
             value: 0,
             timescale: 1,
@@ -221,20 +216,12 @@ fn run_encoding_thread(
         // 6.  Write loop                                                    //
         // ---------------------------------------------------------------- //
         let mut video_norm = PtsNormalizer::new();
-        let mut audio_norm = PtsNormalizer::new();
+        let mut frame_count = 0u64;
 
         loop {
-            // --- Drain audio channel (non-blocking) ---
-            while let Ok(ab) = audio_rx.try_recv() {
-                if audio_input.isReadyForMoreMediaData()
-                    && let Some(retained) = sc_buf_to_retained(&ab)
-                {
-                    let _pts_secs = ab
-                        .presentation_timestamp()
-                        .as_seconds()
-                        .map(|s| audio_norm.normalize_secs(s));
-                    audio_input.appendSampleBuffer(&retained);
-                }
+            // --- Drain (and discard) audio channel ---
+            while audio_rx.try_recv().is_ok() {
+                // Audio buffers discarded until Phase 8 LPCM→AAC converter.
             }
 
             // --- Wait for next video frame (blocking) ---
@@ -246,29 +233,28 @@ fn run_encoding_thread(
                         .presentation_timestamp()
                         .as_seconds()
                         .map(|s| video_norm.normalize_secs(s));
+                    frame_count += 1;
                     video_input.appendSampleBuffer(&retained);
                 }
             } else {
                 // All video senders disconnected → stop recording.
-                info!("video channel disconnected — finalizing output");
+                info!(
+                    frame_count,
+                    "video channel disconnected — finalizing output"
+                );
                 break;
             }
         }
 
         // Drain any remaining audio after the video loop exits.
-        while let Ok(ab) = audio_rx.try_recv() {
-            if audio_input.isReadyForMoreMediaData()
-                && let Some(retained) = sc_buf_to_retained(&ab)
-            {
-                audio_input.appendSampleBuffer(&retained);
-            }
+        while audio_rx.try_recv().is_ok() {
+            // discard
         }
 
         // ---------------------------------------------------------------- //
         // 7.  Finalize                                                      //
         // ---------------------------------------------------------------- //
         video_input.markAsFinished();
-        audio_input.markAsFinished();
 
         #[allow(deprecated)]
         let finished = writer.finishWriting();
@@ -348,42 +334,6 @@ unsafe fn build_video_settings(
         AVVideoCompressionPropertiesKey.expect("AVVideoCompressionPropertiesKey"),
         &**comp,
     );
-
-    dict
-}
-
-/// Builds the AAC audio settings dictionary:
-/// `{ AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000,
-///    AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 128000 }`
-///
-/// Audio settings keys are absent from objc2-av-foundation 0.3.2 (the
-/// `AVAudioSettings.rs` generated file is empty).  We construct them via
-/// `ns_string!` literals.
-///
-/// # Safety
-///
-/// `ns_string!` returns `&'static NSString` — always valid, no allocation.
-unsafe fn build_audio_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
-    // kAudioFormatMPEG4AAC = 'aac ' (CoreAudio AudioFormat.h)
-    // Big-endian FourCC: 'a'=0x61, 'a'=0x61, 'c'=0x63, ' '=0x20 → 0x6161_6320
-    // NOTE: Do NOT use 'mp4a' (0x6D70_3461) — that is the container codec tag,
-    // not the CoreAudio format ID.  Using the wrong constant causes AVFoundation
-    // to throw NSInvalidArgumentException → "Rust cannot catch foreign exceptions".
-    const K_AUDIO_FORMAT_MPEG4_AAC: u32 = 0x6161_6320;
-
-    let dict = NSMutableDictionary::<NSString, AnyObject>::new();
-
-    let fmt_num = NSNumber::new_u32(K_AUDIO_FORMAT_MPEG4_AAC);
-    dict.insert(ns_string!("AVFormatIDKey"), &*fmt_num);
-
-    let sr_num = NSNumber::new_f64(48_000.0);
-    dict.insert(ns_string!("AVSampleRateKey"), &*sr_num);
-
-    let ch_num = NSNumber::new_u32(2);
-    dict.insert(ns_string!("AVNumberOfChannelsKey"), &*ch_num);
-
-    let br_num = NSNumber::new_u32(128_000);
-    dict.insert(ns_string!("AVEncoderBitRateKey"), &*br_num);
 
     dict
 }
