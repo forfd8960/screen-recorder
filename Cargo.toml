@@ -65,6 +65,14 @@ mockall  = "0.12"
 tempfile = "3"
 
 # ---------------------------------------------------------------------------
+# Feature flags
+# ---------------------------------------------------------------------------
+[features]
+# Enable slow integration tests that require the macOS AVFoundation runtime
+# and screen-recording / microphone permissions.
+integration = []
+
+# ---------------------------------------------------------------------------
 # Build profiles
 # ---------------------------------------------------------------------------
 [profile.dev]

@@ -5,7 +5,7 @@
 //! display list is treated as "permission denied".
 
 use screencapturekit::prelude::*;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::AppError;
 
@@ -21,8 +21,28 @@ pub trait ShareableContentChecker: Send {
 }
 
 // ---------------------------------------------------------------------------
-// Public API (T020)
+// Public API (T020 / T034)
 // ---------------------------------------------------------------------------
+
+/// Checks whether the process has microphone access.
+///
+/// Returns `true` when permission is granted (or not yet determined — macOS
+/// automatically prompts the user when `SCStream` starts with
+/// `capturesAudio = true`).  Returns `false` only when the user has
+/// **explicitly denied** access.
+///
+/// # Implementation note
+///
+/// A proper check would call
+/// `AVCaptureDevice::authorizationStatusForMediaType(AVMediaTypeAudio)` via
+/// `objc2-av-foundation`.  That requires the `AVCaptureDevice` crate feature
+/// which is not yet enabled in `Cargo.toml`.  Until then this stub returns
+/// `true`, delegating the actual TCC prompt to `SCStream` on first use.
+///
+/// TODO: replace with `AVCaptureDevice::authorizationStatusForMediaType`.
+pub async fn check_mic_permission() -> bool {
+    true
+}
 
 /// Checks whether the process has TCC permission to record the screen.
 ///
@@ -37,13 +57,22 @@ pub trait ShareableContentChecker: Send {
 pub async fn check_screen_permission() -> Result<bool, AppError> {
     tokio::task::spawn_blocking(|| {
         debug!("checking screen capture permission via SCShareableContent::get()");
-        SCShareableContent::get().map_or(Err(AppError::PermissionDenied), |content| {
-            if content.displays().is_empty() {
-                Err(AppError::PermissionDenied)
-            } else {
-                Ok(true)
+        match SCShareableContent::get() {
+            Ok(content) => {
+                let count = content.displays().len();
+                debug!("SCShareableContent::get() OK — {count} display(s)");
+                if count == 0 {
+                    warn!("SCShareableContent returned 0 displays — treating as permission denied");
+                    Err(AppError::PermissionDenied)
+                } else {
+                    Ok(true)
+                }
             }
-        })
+            Err(e) => {
+                warn!("SCShareableContent::get() failed: {e:?}");
+                Err(AppError::PermissionDenied)
+            }
+        }
     })
     .await
     .map_err(|e| AppError::StreamCreation(e.to_string()))?

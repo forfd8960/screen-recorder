@@ -119,16 +119,56 @@ fn render_controls(ui: &mut Ui, state: &AppState, cmd_tx: &UnboundedSender<Recor
     }
 }
 
-fn render_error(ui: &mut Ui, err: &AppError, _cmd_tx: &UnboundedSender<RecorderCommand>) {
+fn render_error(ui: &mut Ui, err: &AppError, cmd_tx: &UnboundedSender<RecorderCommand>) {
     if matches!(err, AppError::PermissionDenied) {
         ui.colored_label(
             Color32::from_rgb(220, 100, 60),
             "⚠ Screen Recording permission required",
         );
-        ui.label("Open System Settings → Privacy & Security → Screen Recording and enable this app, then restart.");
+        ui.add_space(4.0);
+        ui.label("1. Click the button below to open System Settings.");
+        ui.label("2. Enable this app under Screen Recording.");
+        ui.label(
+            "3. Quit and relaunch this app — macOS requires a restart to apply the permission.",
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("🔒  Open System Settings").clicked() {
+                open_privacy_settings();
+            }
+            if ui.button("⏻  Quit").clicked() {
+                std::process::exit(0);
+            }
+        });
+    } else if matches!(err, AppError::MicrophoneUnavailable) {
+        // T035: non-blocking yellow banner — does not prevent recording.
+        egui::Frame::default()
+            .fill(Color32::from_rgb(255, 220, 80))
+            .inner_margin(egui::Margin::symmetric(8_i8, 6_i8))
+            .corner_radius(egui::CornerRadius::same(4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(80, 60, 0),
+                        "⚠ Microphone unavailable — recording with video only",
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+                            let _ = cmd_tx.send(RecorderCommand::ClearError);
+                        }
+                    });
+                });
+            });
     } else {
         ui.colored_label(Color32::from_rgb(220, 100, 60), format!("⚠ {err}"));
     }
+}
+
+/// Opens the Screen Recording privacy pane in System Settings.
+fn open_privacy_settings() {
+    // Works on macOS 13+ (Ventura) and macOS 12 (Monterey).
+    let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+    let _ = std::process::Command::new("open").arg(url).spawn();
 }
 
 const fn format_elapsed(d: Duration) -> (u64, u64, u64) {

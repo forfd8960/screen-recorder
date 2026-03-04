@@ -17,7 +17,10 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use crate::{
-    capture::{engine::CaptureEngine, permissions::check_screen_permission},
+    capture::{
+        engine::CaptureEngine,
+        permissions::{check_mic_permission, check_screen_permission},
+    },
     config::settings::{RecordingSettings, load_settings},
     encode::pipeline::EncodingPipeline,
     error::AppError,
@@ -74,6 +77,10 @@ pub enum RecorderCommand {
     Accept,
     /// Discard the preview — delete the temporary file and return to idle.
     Discard,
+    /// Re-check screen recording TCC permission (used from the onboarding panel).
+    RetryPermission,
+    /// Dismiss the current non-fatal error banner (e.g. mic-unavailable).
+    ClearError,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +210,7 @@ impl eframe::App for App {
 /// Runs on the Tokio runtime and mutates [`AppState`] in response to each
 /// command.  All mutex acquisitions use `if let Ok(…)` to avoid panicking
 /// on a poisoned lock.
+#[allow(clippy::too_many_lines)]
 async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<RecorderCommand>) {
     info!("command_loop started");
 
@@ -242,6 +250,22 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                 } else {
                     error!("AppState poisoned — cannot start recording");
                     continue;
+                };
+
+                // T034: check microphone permission before starting.
+                // If denied and capture_mic is requested, fall back to
+                // video-only and emit a non-blocking MicrophoneUnavailable banner.
+                let settings = if settings.capture_mic && !check_mic_permission().await {
+                    warn!("microphone permission denied — falling back to video-only recording");
+                    if let Ok(mut s) = state.lock() {
+                        s.last_error = Some(AppError::MicrophoneUnavailable);
+                    }
+                    RecordingSettings {
+                        capture_mic: false,
+                        ..settings
+                    }
+                } else {
+                    settings
                 };
 
                 match RecordingOrchestrator::start(&settings).await {
@@ -313,6 +337,36 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                         error!(?path, error = %e, "failed to delete discarded preview file");
                     } else {
                         info!(?path, "discarded preview file deleted");
+                    }
+                }
+            }
+
+            RecorderCommand::RetryPermission => {
+                info!("re-checking screen recording permission");
+                match check_screen_permission().await {
+                    Ok(_) => {
+                        info!("screen recording permission granted");
+                        if let Ok(mut s) = state.lock() {
+                            s.last_error = None;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("screen recording permission still denied: {e}");
+                        if let Ok(mut s) = state.lock() {
+                            s.last_error = Some(AppError::PermissionDenied);
+                        }
+                    }
+                }
+            }
+
+            // T035: user dismissed the non-fatal error banner.
+            RecorderCommand::ClearError => {
+                if let Ok(mut s) = state.lock() {
+                    // Only clear non-fatal errors (not PermissionDenied, which
+                    // requires the onboarding flow to resolve).
+                    if !matches!(s.last_error, Some(AppError::PermissionDenied)) {
+                        s.last_error = None;
+                        info!("non-fatal error banner dismissed by user");
                     }
                 }
             }

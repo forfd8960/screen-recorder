@@ -88,16 +88,16 @@ Must be 100% complete before any user story phase starts.
 
 ### Tests for User Story 2 (REQUIRED) ⚠️
 
-- [ ] T030 [P] [US2] Write unit test in `src/capture/audio.rs`: `build_audio_config(capture_mic: true)` sets `capturesAudio = true`; `build_audio_config(capture_mic: false)` sets `capturesAudio = false`; `captureMicrophone` field set only on macOS 15+ (compile-time or runtime guard)
-- [ ] T031 [P] [US2] Write integration test `tests/audio_pipeline.rs` (gated `#[cfg_attr(not(feature = "integration"), ignore)]`): mock audio `CMSampleBuffer` appended to `EncodingPipeline` produces non-zero audio track duration in finalized MP4
+- [X] T030 [P] [US2] Write unit test in `src/capture/audio.rs`: `build_audio_config(capture_mic: true)` sets `capturesAudio = true`; `build_audio_config(capture_mic: false)` sets `capturesAudio = false`; `captureMicrophone` field set only on macOS 15+ (compile-time or runtime guard)
+- [X] T031 [P] [US2] Write integration test `tests/audio_pipeline.rs` (gated `#[cfg_attr(not(feature = "integration"), ignore)]`): mock audio `CMSampleBuffer` appended to `EncodingPipeline` produces non-zero audio track duration in finalized MP4
 
 ### Implementation for User Story 2
 
-- [ ] T032 [US2] Implement `src/capture/audio.rs`: `build_audio_config(settings: &RecordingSettings) -> SCStreamConfiguration` fragment setting `captures_audio`, `sample_rate = 48_000`, `channel_count = 2`; conditional `captureMicrophone` property guarded by runtime `os_version >= 15.0` check via `NSProcessInfo`
-- [ ] T033 [US2] Update `CaptureEngine` in `src/capture/engine.rs`: merge audio config from `capture/audio.rs` into `SCStreamConfiguration` builder; ensure audio `CMSampleBuffer` objects flow through `audio_tx` channel to `EncodingPipeline`
-- [ ] T034 [US2] Update `RecordingOrchestrator::start()` in `src/app.rs`: check mic permission before starting; if denied and `settings.capture_mic = true`, set `settings.capture_mic = false`, emit `AppError::MicrophoneUnavailable`, continue with video-only
-- [ ] T035 [US2] Add mic-unavailable banner to `src/ui/main_window.rs`: non-blocking yellow banner shown when `AppState::last_error == Some(MicrophoneUnavailable)`; dismissible; does not block recording
-- [ ] T036 [US2] Add `tracing::warn!` call with `pts_secs` and `stream = "audio"` context in the audio branch of the `SCStreamOutputTrait` implementation
+- [X] T032 [US2] Implement `src/capture/audio.rs`: `build_audio_config(settings: &RecordingSettings) -> SCStreamConfiguration` fragment setting `captures_audio`, `sample_rate = 48_000`, `channel_count = 2`; conditional `captureMicrophone` property guarded by runtime `os_version >= 15.0` check via `NSProcessInfo`
+- [X] T033 [US2] Update `CaptureEngine` in `src/capture/engine.rs`: merge audio config from `capture/audio.rs` into `SCStreamConfiguration` builder; ensure audio `CMSampleBuffer` objects flow through `audio_tx` channel to `EncodingPipeline`
+- [X] T034 [US2] Update `RecordingOrchestrator::start()` in `src/app.rs`: check mic permission before starting; if denied and `settings.capture_mic = true`, set `settings.capture_mic = false`, emit `AppError::MicrophoneUnavailable`, continue with video-only
+- [X] T035 [US2] Add mic-unavailable banner to `src/ui/main_window.rs`: non-blocking yellow banner shown when `AppState::last_error == Some(MicrophoneUnavailable)`; dismissible; does not block recording
+- [X] T036 [US2] Add `tracing::warn!` call with `pts_secs` and `stream = "audio"` context in the audio branch of the `SCStreamOutputTrait` implementation
 
 **Checkpoint**: `ffprobe` on recorded MP4 shows two streams (video + audio) with correct codecs; mic-denied path shows banner and produces video-only file.
 

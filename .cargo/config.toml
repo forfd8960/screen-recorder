@@ -1,0 +1,10 @@
+# Cargo workspace configuration
+#
+# macOS Swift runtime rpath fix:
+# screencapturekit links against @rpath/libswiftCore.dylib.
+# On macOS 12+, the Swift stdlib is in the system dyld shared cache at
+# /usr/lib/swift/.  This rpath entry lets dyld resolve @rpath/libswift*.dylib
+# from the cache even though no standalone .dylib files exist on disk.
+# Without this, the binary aborts at startup with "Library not loaded: @rpath/libswiftCore.dylib".
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

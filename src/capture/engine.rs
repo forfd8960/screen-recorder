@@ -35,9 +35,10 @@ use screencapturekit::{
     },
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
+    capture::audio::audio_capture_params,
     config::settings::{RecordingSettings, Resolution},
     error::AppError,
 };
@@ -63,15 +64,26 @@ struct ChannelHandler {
 }
 
 impl SCStreamOutputTrait for ChannelHandler {
-    fn did_output_sample_buffer(
-        &self,
-        sample_buffer: CMSampleBuffer,
-        _of_type: SCStreamOutputType,
-    ) {
+    fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType) {
+        let is_audio = matches!(of_type, SCStreamOutputType::Audio);
+
+        // T036: log each audio frame with its presentation timestamp.
+        if is_audio {
+            let pts_secs = sample_buffer
+                .presentation_timestamp()
+                .as_seconds()
+                .unwrap_or(f64::NAN);
+            debug!(pts_secs, stream = "audio", "audio frame received");
+        }
+
         if let Err(_e) = self.tx.try_send(sample_buffer) {
             // Channel is full — drop the frame and count it.
             self.frames_dropped.fetch_add(1, Ordering::Relaxed);
-            warn!("frame dropped — video channel full");
+            if is_audio {
+                warn!(stream = "audio", "frame dropped — audio channel full");
+            } else {
+                warn!("frame dropped — video channel full");
+            }
         }
     }
 }
@@ -186,10 +198,19 @@ impl CaptureEngine {
                 .with_excluding_windows(&[])
                 .build();
 
+            // T033: derive audio parameters from settings via audio module.
+            let (audio_enabled, audio_sample_rate, audio_channel_count) =
+                audio_capture_params(&RecordingSettings {
+                    capture_mic: capture_audio,
+                    ..Default::default()
+                });
+
             let config = SCStreamConfiguration::new()
                 .with_width(width)
                 .with_height(height)
-                .with_captures_audio(capture_audio);
+                .with_captures_audio(audio_enabled)
+                .with_sample_rate(audio_sample_rate)
+                .with_channel_count(audio_channel_count);
 
             // -----------------------------------------------------------------
             // 3. Create SCStream and register output handlers.

@@ -6,7 +6,8 @@
 //! - [`engine`]          – `SCStream` lifecycle and frame ingestion
 //! - [`audio`]           – Microphone capture configuration
 
-// Implemented in Phase 2 (M1) and Phase 3 (M2).
+// Implemented in Phase 2 (M1)–Phase 4 (M3).
 
+pub mod audio;
 pub mod engine;
 pub mod permissions;
