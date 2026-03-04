@@ -33,16 +33,12 @@ use objc2_av_foundation::{
     AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264,
     AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoWidthKey,
 };
-use objc2_core_media::{CMSampleBuffer as ObjcCMSampleBuffer, CMTime, CMTimeFlags};
+use objc2_core_media::CMSampleBuffer as ObjcCMSampleBuffer;
 use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::{
-    config::settings::RecordingSettings,
-    encode::{sync::PtsNormalizer, temp_file::TempFile},
-    error::AppError,
-};
+use crate::{config::settings::RecordingSettings, encode::temp_file::TempFile, error::AppError};
 
 // ---------------------------------------------------------------------------
 // EncodingPipeline
@@ -197,27 +193,23 @@ fn run_encoding_thread(
         // NOTE: audio input not added — see Phase 8 comment above.
 
         // ---------------------------------------------------------------- //
-        // 5.  Start writing session at time zero                          //
+        // 5.  Start writing                                                 //
         // ---------------------------------------------------------------- //
         if !writer.startWriting() {
             return Err(AppError::EncodingError(
                 "AVAssetWriter.startWriting() failed".into(),
             ));
         }
-
-        let time_zero = CMTime {
-            value: 0,
-            timescale: 1,
-            flags: CMTimeFlags(1),
-            epoch: 0,
-        };
-        writer.startSessionAtSourceTime(time_zero);
+        // startSessionAtSourceTime is called lazily on the first video frame
+        // using that frame's actual CMTime.  Using a hardcoded time_zero (0 s)
+        // mismatches SCKit's wall-clock timestamps and causes AVFoundation to
+        // reject every buffer with AVErrorUnknown (-11800).
 
         // ---------------------------------------------------------------- //
         // 6.  Write loop                                                    //
         // ---------------------------------------------------------------- //
-        let mut video_norm = PtsNormalizer::new();
         let mut frame_count = 0u64;
+        let mut session_started = false;
 
         loop {
             // --- Drain (and discard) audio channel ---
@@ -230,10 +222,15 @@ fn run_encoding_thread(
                 if video_input.isReadyForMoreMediaData()
                     && let Some(retained) = sc_buf_to_retained(&vb)
                 {
-                    let _pts_secs = vb
-                        .presentation_timestamp()
-                        .as_seconds()
-                        .map(|s| video_norm.normalize_secs(s));
+                    // Anchor the writing session to the first frame's real
+                    // presentation timestamp.  SCKit delivers wall-clock CMTimes;
+                    // using time_zero (0 s) creates a timestamp mismatch that
+                    // causes AVFoundation to reject every buffer (-11800).
+                    if !session_started {
+                        let first_pts = retained.presentation_time_stamp();
+                        writer.startSessionAtSourceTime(first_pts);
+                        session_started = true;
+                    }
                     frame_count += 1;
                     if !video_input.appendSampleBuffer(&retained) {
                         // Writer entered a failed state; check error via writer
