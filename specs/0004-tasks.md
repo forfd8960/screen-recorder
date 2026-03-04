@@ -134,16 +134,16 @@ Must be 100% complete before any user story phase starts.
 
 ### Tests for User Story 4 (REQUIRED) ⚠️
 
-- [ ] T044 [P] [US4] Write unit test in `src/ui/preview_panel.rs`: `handle_discard(temp_path)` deletes the file and emits `RecorderCommand::Discard`; `handle_accept()` emits `RecorderCommand::Accept`
-- [ ] T045 [P] [US4] Write integration test `tests/preview_flow.rs` (gated `#[cfg_attr(not(feature = "integration"), ignore)]`): `TempFile` created → `keep()` called → `AppState` transitions through `Previewing` → `Discard` → file is deleted → status returns to `Idle`
+- [X] T044 [P] [US4] Write unit test in `src/ui/preview_panel.rs`: `handle_discard(temp_path)` deletes the file and emits `RecorderCommand::Discard`; `handle_accept()` emits `RecorderCommand::Accept`
+- [X] T045 [P] [US4] Write integration test `tests/preview_flow.rs` (gated `#[cfg_attr(not(feature = "integration"), ignore)]`): `TempFile` created → `keep()` called → `AppState` transitions through `Previewing` → `Discard` → file is deleted → status returns to `Idle`
 
 ### Implementation for User Story 4
 
-- [ ] T046 [US4] Add `RecorderCommand::Accept` and `RecorderCommand::Discard` variants to the command enum in `src/app.rs`
-- [ ] T047 [US4] Implement `src/ui/preview_panel.rs`: shown when `RecordingStatus == Previewing`; calls `NSWorkspace::openURL(preview_path)` via `objc2` to launch QuickTime; renders Accept and Discard buttons
-- [ ] T048 [US4] Handle `RecorderCommand::Accept` in orchestrator: transition `RecordingStatus` to `Saving`
-- [ ] T049 [US4] Handle `RecorderCommand::Discard` in orchestrator: call `std::fs::remove_file(preview_path)`; log `tracing::info!` on success; transition `RecordingStatus` to `Idle`; clear `AppState::preview_path`
-- [ ] T050 [US4] Register app-local shortcut `⌘ Return` → `RecorderCommand::Accept` and `⌘ Delete` → `RecorderCommand::Discard` in `src/app.rs` via `egui::Context::input_mut`
+- [X] T046 [US4] Add `RecorderCommand::Accept` and `RecorderCommand::Discard` variants to the command enum in `src/app.rs`
+- [X] T047 [US4] Implement `src/ui/preview_panel.rs`: shown when `RecordingStatus == Previewing`; calls `NSWorkspace::openURL(preview_path)` via `objc2` to launch QuickTime; renders Accept and Discard buttons
+- [X] T048 [US4] Handle `RecorderCommand::Accept` in orchestrator: transition `RecordingStatus` to `Saving`
+- [X] T049 [US4] Handle `RecorderCommand::Discard` in orchestrator: call `std::fs::remove_file(preview_path)`; log `tracing::info!` on success; transition `RecordingStatus` to `Idle`; clear `AppState::preview_path`
+- [X] T050 [US4] Register app-local shortcut `⌘ Return` → `RecorderCommand::Accept` and `⌘ Delete` → `RecorderCommand::Discard` in `src/app.rs` via `egui::Context::input_mut`
 
 **Checkpoint**: Stop → QuickTime opens automatically; Accept advances to Saving; Discard removes temp file and shows Idle UI.
 

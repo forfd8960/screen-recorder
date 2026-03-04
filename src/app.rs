@@ -25,7 +25,7 @@ use crate::{
     config::settings::{RecordingSettings, load_settings},
     encode::pipeline::EncodingPipeline,
     error::AppError,
-    ui::{main_window, settings_panel},
+    ui::{main_window, preview_panel, settings_panel},
 };
 
 // ---------------------------------------------------------------------------
@@ -206,7 +206,27 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Ok(state) = self.state.lock() {
-            main_window::show(ctx, &state, &self.cmd_tx);
+            // T050 – preview keyboard shortcuts (⌘ Return / ⌘ ⌫)
+            if matches!(state.recording_status, RecordingStatus::Previewing) {
+                ctx.input(|i| {
+                    if i.modifiers.command && i.key_pressed(egui::Key::Enter) {
+                        preview_panel::handle_accept(&self.cmd_tx);
+                    }
+                    if i.modifiers.command && i.key_pressed(egui::Key::Backspace) {
+                        let path = state.preview_path.clone();
+                        preview_panel::handle_discard(path.as_deref(), &self.cmd_tx);
+                    }
+                });
+            }
+
+            // T047 – show preview panel when Previewing, main window otherwise.
+            if matches!(state.recording_status, RecordingStatus::Previewing) {
+                preview_panel::show(ctx, &state, &self.cmd_tx);
+            } else {
+                main_window::show(ctx, &state, &self.cmd_tx);
+            }
+
+            // Settings panel (bottom) is always visible.
             settings_panel::show(ctx, &state, &self.cmd_tx);
         } else {
             error!("AppState mutex is poisoned — skipping frame render");
@@ -347,18 +367,26 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                 }
             }
 
+            // T048 – Accept: transition to Saving and stay there.
+            // Phase 7 (save_panel) will handle the actual file move and
+            // transition back to Idle once saving completes.
             RecorderCommand::Accept => {
                 if let Ok(mut s) = state.lock() {
-                    s.recording_status = RecordingStatus::Saving;
-                    // Phase 4: move temp file to output_dir here.
-                    s.preview_path = None;
-                    s.recording_status = RecordingStatus::Idle;
-                    info!("recording accepted and saved");
+                    if matches!(s.recording_status, RecordingStatus::Previewing) {
+                        s.recording_status = RecordingStatus::Saving;
+                        info!(?s.preview_path, "recording accepted — transitioning to Saving");
+                    } else {
+                        warn!("Accept command received outside Previewing state — ignoring");
+                    }
                 } else {
                     error!("AppState poisoned — could not accept recording");
                 }
             }
 
+            // T049 – Discard: clean up temp file (best-effort) and return to Idle.
+            // Note: handle_discard() in preview_panel may have already deleted
+            // the file when triggered from a button click; the attempt here is
+            // a safety net for keyboard-shortcut paths and future callers.
             RecorderCommand::Discard => {
                 let preview = if let Ok(mut s) = state.lock() {
                     s.recording_status = RecordingStatus::Idle;
@@ -369,10 +397,15 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                 };
 
                 if let Some(path) = preview {
-                    if let Err(e) = tokio::fs::remove_file(&path).await {
-                        error!(?path, error = %e, "failed to delete discarded preview file");
-                    } else {
-                        info!(?path, "discarded preview file deleted");
+                    match tokio::fs::remove_file(&path).await {
+                        Ok(()) => info!(?path, "discarded preview file deleted"),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Already deleted by the UI handler — this is expected.
+                            info!(?path, "preview file already removed before Discard command");
+                        }
+                        Err(e) => {
+                            error!(?path, error = %e, "failed to delete discarded preview file");
+                        }
                     }
                 }
             }

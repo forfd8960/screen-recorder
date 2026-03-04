@@ -7,4 +7,5 @@
 //! - [`save_panel`]     – Folder picker and completion toast
 
 pub mod main_window;
+pub mod preview_panel;
 pub mod settings_panel;
