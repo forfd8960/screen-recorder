@@ -57,14 +57,27 @@ const CHANNEL_CAPACITY: usize = 120;
 /// `Send` because:
 /// * `mpsc::Sender<CMSampleBuffer>`: `Send` if `CMSampleBuffer: Send` ✓
 /// * `Arc<AtomicU64>`: `Send` ✓
+///
+/// `expected_type` guards against SCKit routing multiple output types to a
+/// single handler: any buffer whose `of_type` does not match is silently
+/// discarded before it can corrupt the channel.
 struct ChannelHandler {
     tx: mpsc::Sender<CMSampleBuffer>,
+    expected_type: SCStreamOutputType,
     frames_dropped: Arc<AtomicU64>,
 }
 
 impl SCStreamOutputTrait for ChannelHandler {
     fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType) {
+        // Guard: SCKit may invoke every registered handler for every output
+        // type.  Only forward buffers whose type matches what this handler
+        // was created for, to prevent audio buffers reaching the video
+        // AVAssetWriterInput (which would throw NSInvalidArgumentException).
         let is_audio = matches!(of_type, SCStreamOutputType::Audio);
+        let want_audio = matches!(self.expected_type, SCStreamOutputType::Audio);
+        if is_audio != want_audio {
+            return;
+        }
 
         // T036: log each audio frame with its presentation timestamp.
         if is_audio {
@@ -210,6 +223,7 @@ impl CaptureEngine {
 
                 let video_handler = ChannelHandler {
                     tx: video_tx,
+                    expected_type: SCStreamOutputType::Screen,
                     frames_dropped: Arc::clone(&frames_dropped),
                 };
                 stream.add_output_handler(video_handler, SCStreamOutputType::Screen);
@@ -217,6 +231,7 @@ impl CaptureEngine {
                 if capture_audio {
                     let audio_handler = ChannelHandler {
                         tx: audio_tx,
+                        expected_type: SCStreamOutputType::Audio,
                         frames_dropped: Arc::clone(&frames_dropped),
                     };
                     stream.add_output_handler(audio_handler, SCStreamOutputType::Audio);
