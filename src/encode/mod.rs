@@ -6,3 +6,7 @@
 //! - [`temp_file`]  – RAII wrapper for the temporary `$TMPDIR/screen-recorder/<uuid>.mp4` path
 
 // Implemented in Phase 3 (M2 / M3).
+
+pub mod pipeline;
+pub mod sync;
+pub mod temp_file;

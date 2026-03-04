@@ -14,7 +14,15 @@
         "cargo build": true,
         "cargo fmt": true,
         "cargo clippy": true,
-        "git commit": true
+        "git commit": true,
+        "/^bash \\.specify/scripts/bash/check-prerequisites\\.sh --json --require-tasks --include-tasks 2>/dev/null \\| head -60$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^set SCK_DIR ~/\\.cargo/registry/src/index\\.crates\\.io-1949cf8c6b5b557f/screencapturekit-1\\.5\\.1\ncat \\$SCK_DIR/src/stream/output_trait\\.rs$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }
 

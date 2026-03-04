@@ -7,3 +7,6 @@
 //! - [`audio`]           – Microphone capture configuration
 
 // Implemented in Phase 2 (M1) and Phase 3 (M2).
+
+pub mod engine;
+pub mod permissions;

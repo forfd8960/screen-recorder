@@ -59,22 +59,22 @@ Must be 100% complete before any user story phase starts.
 
 > Write these tests FIRST; they must FAIL before implementation begins.
 
-- [ ] T017 [P] [US1] Write unit test in `src/capture/permissions.rs`: `check_screen_permission` returns `Err(AppError::PermissionDenied)` when shareable content arrays are empty (mock via trait)
-- [ ] T018 [P] [US1] Write unit test in `src/encode/sync.rs`: `PtsNormalizer::normalize` — first call sets base, subsequent calls return monotonically increasing relative times; handles static-screen frame gaps; handles audio-arrives-before-video ordering
-- [ ] T019 [US1] Write integration test `tests/pts_normalizer.rs`: full scenario — 5 video PTS values with a 2 s gap in the middle — assert output times are all non-negative and correctly offset
+- [X] T017 [P] [US1] Write unit test in `src/capture/permissions.rs`: `check_screen_permission` returns `Err(AppError::PermissionDenied)` when shareable content arrays are empty (mock via trait)
+- [X] T018 [P] [US1] Write unit test in `src/encode/sync.rs`: `PtsNormalizer::normalize` — first call sets base, subsequent calls return monotonically increasing relative times; handles static-screen frame gaps; handles audio-arrives-before-video ordering
+- [X] T019 [US1] Write integration test `tests/pts_normalizer.rs`: full scenario — 5 video PTS values with a 2 s gap in the middle — assert output times are all non-negative and correctly offset
 
 ### Implementation for User Story 1
 
-- [ ] T020 [US1] Implement `src/capture/permissions.rs`: async `check_screen_permission() -> Result<bool, AppError>` calling `SCShareableContent::get_shareable_content_with_completion_handler`; return `Err(AppError::PermissionDenied)` if arrays empty
-- [ ] T021 [US1] Implement `src/encode/sync.rs`: `PtsNormalizer` struct with `base_time: Option<CMTime>` and `normalize(&mut self, pts: CMTime) -> CMTime`; shared via `Arc<Mutex<PtsNormalizer>>`
-- [ ] T022 [US1] Implement `src/encode/temp_file.rs`: `TempFile` RAII struct; generates path `$TMPDIR/screen-recorder/<uuid>.mp4`; deletes file on `Drop` unless `keep()` was called; creates parent directory if missing
-- [ ] T023 [US1] Implement `src/capture/engine.rs`: `CaptureEngine` struct with bounded `tokio::sync::mpsc` channels (capacity 120 each for video and audio); `SCStreamOutputTrait` impl using `try_send`; `frames_dropped: AtomicU64` counter; `#[allow(unsafe_code)]` scoped to module with per-block `// SAFETY:` comments
-- [ ] T024 [US1] Implement `CaptureEngine::start() -> Result<(), AppError>` and `CaptureEngine::stop() -> Result<(), AppError>` in `src/capture/engine.rs`
-- [ ] T025 [US1] Implement `src/encode/pipeline.rs`: `EncodingPipeline::new(settings, video_rx, audio_rx, stop_rx)`; `AVAssetWriter` + `AVAssetWriterInput` for video (H.264, `expectsMediaDataInRealTime = true`, BT.709 color profile) and audio (AAC 48 kHz stereo 128 kbps); `finish() -> Result<PathBuf, AppError>`; `#[allow(unsafe_code)]` with `// SAFETY:` comments
-- [ ] T026 [US1] Implement async write loop in `src/encode/pipeline.rs`: `spawn_blocking` task; `select!` over `video_rx`, `audio_rx`, `stop_rx`; `is_ready_for_more_media_data` guard before each append; call `PtsNormalizer::normalize` for both streams
-- [ ] T027 [US1] Implement `RecordingOrchestrator` in `src/app.rs`: owns `CaptureEngine` + `EncodingPipeline`; `start() -> Result<(), AppError>` wires channels and starts both; `stop() -> Result<(), AppError>` sends stop signal, awaits `finish()`, stores `preview_path`, transitions `RecordingStatus` to `Previewing`
-- [ ] T028 [US1] Implement `src/ui/main_window.rs`: Start button (disabled if `RecordingStatus ≠ Idle` or permission denied); Stop button (visible only when `Recording`); status badge (green "● Recording" / grey "Ready"); dispatch `RecorderCommand::Start` / `::Stop` on click
-- [ ] T029 [US1] Wire TCC onboarding in `src/app.rs`: if `check_screen_permission` returns `Err(PermissionDenied)`, set `AppState::last_error`; render onboarding panel with "Open System Settings" deep-link via `NSWorkspace::openURL`
+- [X] T020 [US1] Implement `src/capture/permissions.rs`: async `check_screen_permission() -> Result<bool, AppError>` calling `SCShareableContent::get_shareable_content_with_completion_handler`; return `Err(AppError::PermissionDenied)` if arrays empty
+- [X] T021 [US1] Implement `src/encode/sync.rs`: `PtsNormalizer` struct with `base_time: Option<CMTime>` and `normalize(&mut self, pts: CMTime) -> CMTime`; shared via `Arc<Mutex<PtsNormalizer>>`
+- [X] T022 [US1] Implement `src/encode/temp_file.rs`: `TempFile` RAII struct; generates path `$TMPDIR/screen-recorder/<uuid>.mp4`; deletes file on `Drop` unless `keep()` was called; creates parent directory if missing
+- [X] T023 [US1] Implement `src/capture/engine.rs`: `CaptureEngine` struct with bounded `tokio::sync::mpsc` channels (capacity 120 each for video and audio); `SCStreamOutputTrait` impl using `try_send`; `frames_dropped: AtomicU64` counter; `#[allow(unsafe_code)]` scoped to module with per-block `// SAFETY:` comments
+- [X] T024 [US1] Implement `CaptureEngine::start() -> Result<(), AppError>` and `CaptureEngine::stop() -> Result<(), AppError>` in `src/capture/engine.rs`
+- [X] T025 [US1] Implement `src/encode/pipeline.rs`: `EncodingPipeline::new(settings, video_rx, audio_rx, stop_rx)`; `AVAssetWriter` + `AVAssetWriterInput` for video (H.264, `expectsMediaDataInRealTime = true`, BT.709 color profile) and audio (AAC 48 kHz stereo 128 kbps); `finish() -> Result<PathBuf, AppError>`; `#[allow(unsafe_code)]` with `// SAFETY:` comments
+- [X] T026 [US1] Implement async write loop in `src/encode/pipeline.rs`: `spawn_blocking` task; `select!` over `video_rx`, `audio_rx`, `stop_rx`; `is_ready_for_more_media_data` guard before each append; call `PtsNormalizer::normalize` for both streams
+- [X] T027 [US1] Implement `RecordingOrchestrator` in `src/app.rs`: owns `CaptureEngine` + `EncodingPipeline`; `start() -> Result<(), AppError>` wires channels and starts both; `stop() -> Result<(), AppError>` sends stop signal, awaits `finish()`, stores `preview_path`, transitions `RecordingStatus` to `Previewing`
+- [X] T028 [US1] Implement `src/ui/main_window.rs`: Start button (disabled if `RecordingStatus ≠ Idle` or permission denied); Stop button (visible only when `Recording`); status badge (green "● Recording" / grey "Ready"); dispatch `RecorderCommand::Start` / `::Stop` on click
+- [X] T029 [US1] Wire TCC onboarding in `src/app.rs`: if `check_screen_permission` returns `Err(PermissionDenied)`, set `AppState::last_error`; render onboarding panel with "Open System Settings" deep-link via `NSWorkspace::openURL`
 
 **Checkpoint**: App compiles; Start → Recording → Stop → Previewing state flow works end-to-end; temp MP4 file exists in `$TMPDIR/screen-recorder/`.
 
