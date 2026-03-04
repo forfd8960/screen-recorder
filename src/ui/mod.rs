@@ -6,4 +6,4 @@
 //! - [`preview_panel`]  – `QuickTime` launch and Accept/Discard buttons
 //! - [`save_panel`]     – Folder picker and completion toast
 
-// Implemented in Phase 2 (M1) through Phase 7 (M5).
+pub mod main_window;

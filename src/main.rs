@@ -7,14 +7,38 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![warn(rust_2018_idioms)]
 
-mod capture;
-mod config;
-mod encode;
-mod output;
-mod ui;
+use anyhow::Context as _;
+use eframe::egui::ViewportBuilder;
+use screen_recorder::app::App;
+use tracing_subscriber::EnvFilter;
 
-fn main() {
-    // Phase 1 scaffold: modules compile, lint gates pass.
-    // Full application entry-point wired in Phase 2 (T012 / T013).
-    println!("screen-recorder: scaffold OK");
+fn main() -> anyhow::Result<()> {
+    // --- Tracing ---
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("screen_recorder=info")),
+        )
+        .init();
+
+    // --- Tokio runtime (blocking calls spawned from capture/encode layers) ---
+    let rt = tokio::runtime::Runtime::new().context("failed to start Tokio runtime")?;
+    let rt_handle = rt.handle().clone();
+
+    // --- egui / eframe window (blocks until the user closes the window) ---
+    let native_options = eframe::NativeOptions {
+        viewport: ViewportBuilder::default()
+            .with_title("Screen Recorder")
+            .with_inner_size([480.0_f32, 320.0_f32]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Screen Recorder",
+        native_options,
+        Box::new(move |cc| Ok(Box::new(App::new(cc, &rt_handle)))),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe window error: {e}"))?;
+
+    Ok(())
 }

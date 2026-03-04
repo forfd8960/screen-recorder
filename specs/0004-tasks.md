@@ -36,14 +36,14 @@ Must be 100% complete before any user story phase starts.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T009 Implement `src/error.rs`: `AppError` enum with all variants (`PermissionDenied`, `NoShareableContent`, `StreamCreation`, `EncodingError`, `Io`, `MicrophoneUnavailable`) using `thiserror`
-- [ ] T010 [P] Implement `src/config/settings.rs`: `Resolution`, `VideoQuality`, `CaptureRegion`, `RecordingSettings` structs with `serde` derives and `Default` impl; `load_settings()` and `save_settings()` using `~/Library/Application Support/screen-recorder/settings.json`
-- [ ] T011 [P] Implement `src/app.rs`: `RecordingStatus` enum (`Idle`, `Recording { started_at }`, `Previewing`, `Saving`); `AppState` struct; `RecorderCommand` enum; `tokio::sync::mpsc::UnboundedSender<RecorderCommand>` wired into egui `App`
-- [ ] T012 [P] Wire `tokio::runtime::Runtime` creation in `src/main.rs`; pass handle into `App::new`; call `eframe::run_native`
-- [ ] T013 [P] Initialize `tracing-subscriber` with `EnvFilter` in `src/main.rs`; respects `RUST_LOG` env var
-- [ ] T014 Write integration test `tests/settings_roundtrip.rs`: `Default` → serialize → write → read → deserialize → assert fields equal; covers `Resolution`, `VideoQuality`, `CaptureRegion` variants
-- [ ] T015 [P] Write unit test in `src/config/settings.rs` module: `RecordingSettings::default()` produces valid values; `frame_rate` ∈ {24, 30, 60} variants compile correctly
-- [ ] T016 Verify: `cargo test` passes T014/T015; `cargo fmt --check` passes; `cargo clippy -- -D warnings` passes
+- [X] T009 Implement `src/error.rs`: `AppError` enum with all variants (`PermissionDenied`, `NoShareableContent`, `StreamCreation`, `EncodingError`, `Io`, `MicrophoneUnavailable`) using `thiserror`
+- [X] T010 [P] Implement `src/config/settings.rs`: `Resolution`, `VideoQuality`, `CaptureRegion`, `RecordingSettings` structs with `serde` derives and `Default` impl; `load_settings()` and `save_settings()` using `~/Library/Application Support/screen-recorder/settings.json`
+- [X] T011 [P] Implement `src/app.rs`: `RecordingStatus` enum (`Idle`, `Recording { started_at }`, `Previewing`, `Saving`); `AppState` struct; `RecorderCommand` enum; `tokio::sync::mpsc::UnboundedSender<RecorderCommand>` wired into egui `App`
+- [X] T012 [P] Wire `tokio::runtime::Runtime` creation in `src/main.rs`; pass handle into `App::new`; call `eframe::run_native`
+- [X] T013 [P] Initialize `tracing-subscriber` with `EnvFilter` in `src/main.rs`; respects `RUST_LOG` env var
+- [X] T014 Write integration test `tests/settings_roundtrip.rs`: `Default` → serialize → write → read → deserialize → assert fields equal; covers `Resolution`, `VideoQuality`, `CaptureRegion` variants
+- [X] T015 [P] Write unit test in `src/config/settings.rs` module: `RecordingSettings::default()` produces valid values; `frame_rate` ∈ {24, 30, 60} variants compile correctly
+- [X] T016 Verify: `cargo test` passes T014/T015; `cargo fmt --check` passes; `cargo clippy -- -D warnings` passes
 
 **Checkpoint**: Foundation ready — all user story phases can now start.
 

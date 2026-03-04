@@ -10,7 +10,11 @@
         ".specify/scripts/bash/": true,
         ".specify/scripts/powershell/": true,
         "cargo test": true,
-        "git add": true
+        "git add": true,
+        "cargo build": true,
+        "cargo fmt": true,
+        "cargo clippy": true,
+        "git commit": true
     }
 }
 
