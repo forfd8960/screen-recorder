@@ -364,8 +364,12 @@ unsafe fn build_video_settings(
 ///
 /// `ns_string!` returns `&'static NSString` — always valid, no allocation.
 unsafe fn build_audio_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
-    // kAudioFormatMPEG4AAC = FourCC 'mp4a' = 0x6D70_3461
-    const K_AUDIO_FORMAT_MPEG4_AAC: u32 = 0x6D70_3461;
+    // kAudioFormatMPEG4AAC = 'aac ' (CoreAudio AudioFormat.h)
+    // Big-endian FourCC: 'a'=0x61, 'a'=0x61, 'c'=0x63, ' '=0x20 → 0x6161_6320
+    // NOTE: Do NOT use 'mp4a' (0x6D70_3461) — that is the container codec tag,
+    // not the CoreAudio format ID.  Using the wrong constant causes AVFoundation
+    // to throw NSInvalidArgumentException → "Rust cannot catch foreign exceptions".
+    const K_AUDIO_FORMAT_MPEG4_AAC: u32 = 0x6161_6320;
 
     let dict = NSMutableDictionary::<NSString, AnyObject>::new();
 
