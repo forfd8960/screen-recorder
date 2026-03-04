@@ -24,13 +24,14 @@
 #![allow(unsafe_op_in_unsafe_fn)] // extern static accesses are safe inside documented unsafe fns
 
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
-    AVAssetWriter, AVAssetWriterInput, AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey,
-    AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoHeightKey,
-    AVVideoWidthKey,
+    AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo,
+    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264,
+    AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoWidthKey,
 };
 use objc2_core_media::{CMSampleBuffer as ObjcCMSampleBuffer, CMTime, CMTimeFlags};
 use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
@@ -234,7 +235,15 @@ fn run_encoding_thread(
                         .as_seconds()
                         .map(|s| video_norm.normalize_secs(s));
                     frame_count += 1;
-                    video_input.appendSampleBuffer(&retained);
+                    if !video_input.appendSampleBuffer(&retained) {
+                        // Writer entered a failed state; check error via writer
+                        // after the loop exits.
+                        warn!(
+                            frame_count,
+                            "appendSampleBuffer returned false — breaking write loop"
+                        );
+                        break;
+                    }
                 }
             } else {
                 // All video senders disconnected → stop recording.
@@ -256,12 +265,33 @@ fn run_encoding_thread(
         // ---------------------------------------------------------------- //
         video_input.markAsFinished();
 
-        #[allow(deprecated)]
-        let finished = writer.finishWriting();
-        if !finished {
-            return Err(AppError::EncodingError(
-                "AVAssetWriter.finishWriting() returned false".into(),
-            ));
+        // Use the non-deprecated async completion-handler API so that
+        // finishWriting works correctly on all supported macOS versions.
+        // We block the current spawn_blocking thread using a Condvar.
+        let signal = Arc::new((Mutex::new(false), Condvar::new()));
+        let signal2 = Arc::clone(&signal);
+        let completion = block2::RcBlock::new(move || {
+            *signal2.0.lock().unwrap() = true;
+            signal2.1.notify_one();
+        });
+        writer.finishWritingWithCompletionHandler(&*completion);
+
+        // Wait for the completion handler to fire.
+        let mut done = signal.0.lock().unwrap();
+        while !*done {
+            done = signal.1.wait(done).unwrap();
+        }
+        drop(done);
+
+        // Check final status; surface the NSError if the writer failed.
+        if writer.status() != AVAssetWriterStatus::Completed {
+            let err_desc = writer
+                .error()
+                .map(|e| format!("{e:?}"))
+                .unwrap_or_else(|| format!("status={}", writer.status().0));
+            return Err(AppError::EncodingError(format!(
+                "AVAssetWriter finishWriting failed: {err_desc}"
+            )));
         }
 
         info!(path = %output_path.display(), "encoding pipeline finished");
