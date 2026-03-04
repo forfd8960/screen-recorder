@@ -28,18 +28,17 @@ use std::sync::{
 
 use screencapturekit::{
     CMSampleBuffer,
-    shareable_content::SCShareableContent,
     stream::{
-        SCStream, configuration::SCStreamConfiguration, content_filter::SCContentFilter,
-        output_trait::SCStreamOutputTrait, output_type::SCStreamOutputType,
+        SCStream, configuration::SCStreamConfiguration, output_trait::SCStreamOutputTrait,
+        output_type::SCStreamOutputType,
     },
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    capture::audio::audio_capture_params,
-    config::settings::{RecordingSettings, Resolution},
+    capture::{audio::audio_capture_params, content_filter},
+    config::settings::RecordingSettings,
     error::AppError,
 };
 
@@ -152,15 +151,24 @@ impl CaptureEngine {
     ///
     /// Panics if called when the internal senders have already been consumed
     /// (i.e. this `CaptureEngine` was created without holding the receivers).
-    pub async fn start(&mut self, settings: &RecordingSettings) -> Result<(), AppError> {
+    ///
+    /// # Returns
+    ///
+    /// Returns the actual capture dimensions `(width, height)` used for the
+    /// stream configuration.  The caller should pass these to the
+    /// [`EncodingPipeline`] so that `AVAssetWriterInput` never receives
+    /// zero-dimension settings (which causes a fatal Objective-C exception).
+    pub async fn start(&mut self, settings: &RecordingSettings) -> Result<(u32, u32), AppError> {
         if self.stream.is_some() {
             info!("CaptureEngine::start called while already running — ignoring");
-            return Ok(());
+            // Return a placeholder; the engine is already running with valid dims.
+            return Ok((0, 0));
         }
 
         // Clone settings so it can be moved into spawn_blocking.
-        let resolution = settings.resolution;
+        let region = settings.region;
         let capture_audio = settings.capture_mic;
+        let settings_clone = settings.clone();
 
         let video_tx = self
             .video_tx
@@ -172,80 +180,64 @@ impl CaptureEngine {
             .expect("audio_tx should be present before start");
         let frames_dropped = Arc::clone(&self.frames_dropped);
 
-        // SCShareableContent::get(), SCStream::new(), start_capture() are all
-        // blocking FFI calls — offload to a dedicated OS thread.
-        let stream = tokio::task::spawn_blocking(move || -> Result<SCStream, AppError> {
-            // -----------------------------------------------------------------
-            // 1. Enumerate shareable content to obtain display geometry.
-            // -----------------------------------------------------------------
-            let content = SCShareableContent::get()
-                .map_err(|e| AppError::StreamCreation(format!("SCShareableContent: {e:?}")))?;
+        // All blocking FFI calls are offloaded to a dedicated OS thread.
+        let stream =
+            tokio::task::spawn_blocking(move || -> Result<(SCStream, u32, u32), AppError> {
+                // -----------------------------------------------------------------
+                // 1. Build content filter and resolve capture dimensions.
+                //    T041: delegate to `content_filter::build_filter` which
+                //    handles FullScreen / Window / Area and self-exclusion.
+                // -----------------------------------------------------------------
+                let (filter, width, height) = content_filter::build_filter(&region)?;
 
-            let displays = content.displays();
-            if displays.is_empty() {
-                return Err(AppError::NoShareableContent);
-            }
+                // -----------------------------------------------------------------
+                // 2. Build stream configuration.
+                // -----------------------------------------------------------------
+                let (audio_enabled, audio_sample_rate, audio_channel_count) =
+                    audio_capture_params(&settings_clone);
 
-            // Use the first (primary) display.
-            let display = &displays[0];
-            let (width, height) = display_dimensions(resolution, display);
+                let config = SCStreamConfiguration::new()
+                    .with_width(width)
+                    .with_height(height)
+                    .with_captures_audio(audio_enabled)
+                    .with_sample_rate(audio_sample_rate)
+                    .with_channel_count(audio_channel_count);
 
-            // -----------------------------------------------------------------
-            // 2. Build content filter and stream configuration.
-            // -----------------------------------------------------------------
-            let filter = SCContentFilter::create()
-                .with_display(display)
-                .with_excluding_windows(&[])
-                .build();
+                // -----------------------------------------------------------------
+                // 3. Create SCStream and register output handlers.
+                // -----------------------------------------------------------------
+                let mut stream = SCStream::new(&filter, &config);
 
-            // T033: derive audio parameters from settings via audio module.
-            let (audio_enabled, audio_sample_rate, audio_channel_count) =
-                audio_capture_params(&RecordingSettings {
-                    capture_mic: capture_audio,
-                    ..Default::default()
-                });
-
-            let config = SCStreamConfiguration::new()
-                .with_width(width)
-                .with_height(height)
-                .with_captures_audio(audio_enabled)
-                .with_sample_rate(audio_sample_rate)
-                .with_channel_count(audio_channel_count);
-
-            // -----------------------------------------------------------------
-            // 3. Create SCStream and register output handlers.
-            // -----------------------------------------------------------------
-            let mut stream = SCStream::new(&filter, &config);
-
-            let video_handler = ChannelHandler {
-                tx: video_tx,
-                frames_dropped: Arc::clone(&frames_dropped),
-            };
-            stream.add_output_handler(video_handler, SCStreamOutputType::Screen);
-
-            if capture_audio {
-                let audio_handler = ChannelHandler {
-                    tx: audio_tx,
+                let video_handler = ChannelHandler {
+                    tx: video_tx,
                     frames_dropped: Arc::clone(&frames_dropped),
                 };
-                stream.add_output_handler(audio_handler, SCStreamOutputType::Audio);
-            }
+                stream.add_output_handler(video_handler, SCStreamOutputType::Screen);
 
-            // -----------------------------------------------------------------
-            // 4. Begin capture (blocking until the OS confirms started).
-            // -----------------------------------------------------------------
-            stream
-                .start_capture()
-                .map_err(|e| AppError::StreamCreation(format!("start_capture: {e:?}")))?;
+                if capture_audio {
+                    let audio_handler = ChannelHandler {
+                        tx: audio_tx,
+                        frames_dropped: Arc::clone(&frames_dropped),
+                    };
+                    stream.add_output_handler(audio_handler, SCStreamOutputType::Audio);
+                }
 
-            info!(width, height, capture_audio, "SCStream started");
-            Ok(stream)
-        })
-        .await
-        .map_err(|e| AppError::StreamCreation(format!("spawn_blocking join: {e}")))??;
+                // -----------------------------------------------------------------
+                // 4. Begin capture (blocking until the OS confirms started).
+                // -----------------------------------------------------------------
+                stream
+                    .start_capture()
+                    .map_err(|e| AppError::StreamCreation(format!("start_capture: {e:?}")))?;
 
+                info!(width, height, capture_audio, "SCStream started");
+                Ok((stream, width, height))
+            })
+            .await
+            .map_err(|e| AppError::StreamCreation(format!("spawn_blocking join: {e}")))??;
+
+        let (stream, actual_w, actual_h) = stream;
         self.stream = Some(stream);
-        Ok(())
+        Ok((actual_w, actual_h))
     }
 
     /// Stops the capture session and disconnects both frame channels.
@@ -289,23 +281,6 @@ impl Default for CaptureEngine {
     fn default() -> Self {
         let (engine, _vr, _ar) = Self::new();
         engine
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Resolves the output dimensions from the requested [`Resolution`] and the
-/// native display size.
-fn display_dimensions(
-    resolution: Resolution,
-    display: &screencapturekit::shareable_content::SCDisplay,
-) -> (u32, u32) {
-    match resolution {
-        Resolution::Native => (display.width(), display.height()),
-        Resolution::P1080 => (1920, 1080),
-        Resolution::P720 => (1280, 720),
     }
 }
 

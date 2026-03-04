@@ -85,7 +85,7 @@ pub struct Rect {
 ///
 /// Maps 1-to-1 to `SCContentFilter` variants (see
 /// `src/capture/content_filter.rs`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CaptureRegion {
     /// Capture an entire display, identified by its Core Graphics display ID.

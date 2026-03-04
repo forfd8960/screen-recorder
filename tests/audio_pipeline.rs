@@ -36,7 +36,7 @@ fn encoding_pipeline_new_does_not_panic() {
         let (_video_tx, video_rx) = mpsc::channel(8);
         let (_audio_tx, audio_rx) = mpsc::channel(8);
 
-        let pipeline = EncodingPipeline::new(&settings, video_rx, audio_rx);
+        let pipeline = EncodingPipeline::new(&settings, video_rx, audio_rx, 1280, 720);
         assert!(
             pipeline.is_ok(),
             "EncodingPipeline::new must succeed: {:?}",

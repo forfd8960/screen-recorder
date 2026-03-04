@@ -18,13 +18,14 @@ use tracing::{error, info, warn};
 
 use crate::{
     capture::{
+        content_filter::{DisplayInfo, WindowInfo},
         engine::CaptureEngine,
         permissions::{check_mic_permission, check_screen_permission},
     },
     config::settings::{RecordingSettings, load_settings},
     encode::pipeline::EncodingPipeline,
     error::AppError,
-    ui::main_window,
+    ui::{main_window, settings_panel},
 };
 
 // ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ impl RecordingStatus {
 // ---------------------------------------------------------------------------
 
 /// Commands sent from UI event handlers to the async [`command_loop`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RecorderCommand {
     /// Begin a capture session using the current settings.
     Start,
@@ -81,6 +82,10 @@ pub enum RecorderCommand {
     RetryPermission,
     /// Dismiss the current non-fatal error banner (e.g. mic-unavailable).
     ClearError,
+    /// Update the capture region in settings (sent from the region picker).
+    UpdateRegion(crate::config::settings::CaptureRegion),
+    /// Refresh the available display and window lists (sent when settings panel opens).
+    RefreshContent,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,8 +118,11 @@ impl RecordingOrchestrator {
     /// created.
     pub async fn start(settings: &RecordingSettings) -> Result<Self, AppError> {
         let (mut engine, video_rx, audio_rx) = CaptureEngine::new();
-        let pipeline = EncodingPipeline::new(settings, video_rx, audio_rx)?;
-        engine.start(settings).await?;
+        // Start the engine first to obtain the actual capture dimensions.
+        // Frames are buffered in the channel (capacity 120) until the
+        // encoding pipeline thread begins draining them.
+        let (width, height) = engine.start(settings).await?;
+        let pipeline = EncodingPipeline::new(settings, video_rx, audio_rx, width, height)?;
         Ok(Self { engine, pipeline })
     }
 
@@ -157,6 +165,10 @@ pub struct AppState {
     pub preview_path: Option<PathBuf>,
     /// Most recent non-fatal error, displayed in the UI.
     pub last_error: Option<AppError>,
+    /// Available displays, populated on startup and on settings-panel open.
+    pub available_displays: Vec<DisplayInfo>,
+    /// Available windows, populated on startup and on settings-panel open.
+    pub available_windows: Vec<WindowInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +207,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Ok(state) = self.state.lock() {
             main_window::show(ctx, &state, &self.cmd_tx);
+            settings_panel::show(ctx, &state, &self.cmd_tx);
         } else {
             error!("AppState mutex is poisoned — skipping frame render");
         }
@@ -229,6 +242,29 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
         Err(e) => {
             warn!("permission check failed: {e}");
         }
+    }
+
+    // T043: Populate available displays and windows asynchronously at startup.
+    match tokio::task::spawn_blocking(|| {
+        use crate::capture::content_filter::{list_displays, list_windows};
+        let displays = list_displays().unwrap_or_default();
+        let windows = list_windows().unwrap_or_default();
+        (displays, windows)
+    })
+    .await
+    {
+        Ok((displays, windows)) => {
+            if let Ok(mut s) = state.lock() {
+                info!(
+                    available_displays = displays.len(),
+                    available_windows = windows.len(),
+                    "display and window lists populated"
+                );
+                s.available_displays = displays;
+                s.available_windows = windows;
+            }
+        }
+        Err(e) => warn!("failed to populate display/window lists: {e}"),
     }
 
     // The active orchestrator lives here — not inside AppState — to avoid
@@ -369,6 +405,37 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                         info!("non-fatal error banner dismissed by user");
                     }
                 }
+            }
+
+            // T042/T043: region picker selection changed.
+            RecorderCommand::UpdateRegion(region) => {
+                if let Ok(mut s) = state.lock() {
+                    if s.recording_status.is_idle() {
+                        info!(?region, "capture region updated");
+                        s.settings.region = region;
+                    } else {
+                        warn!("UpdateRegion ignored while recording is in progress");
+                    }
+                }
+            }
+
+            // T043: refresh available display and window lists.
+            RecorderCommand::RefreshContent => {
+                let state_ref = Arc::clone(&state);
+                tokio::task::spawn_blocking(move || {
+                    use crate::capture::content_filter::{list_displays, list_windows};
+                    let displays = list_displays().unwrap_or_default();
+                    let windows = list_windows().unwrap_or_default();
+                    if let Ok(mut s) = state_ref.lock() {
+                        info!(
+                            available_displays = displays.len(),
+                            available_windows = windows.len(),
+                            "display/window lists refreshed"
+                        );
+                        s.available_displays = displays;
+                        s.available_windows = windows;
+                    }
+                });
             }
         }
     }

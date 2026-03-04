@@ -111,16 +111,16 @@ Must be 100% complete before any user story phase starts.
 
 ### Tests for User Story 3 (REQUIRED) ⚠️
 
-- [ ] T037 [P] [US3] Write unit tests in `src/capture/content_filter.rs`: `build_filter(FullScreen { display_id: 1 })` produces a filter with the correct display; `build_filter(Window { window_id: 42 })` produces a window filter; self-exclusion entry is always present in `excludingApplications`
-- [ ] T038 [P] [US3] Write unit test: `build_filter(Area { rect })` with zero-width rect returns `Err(AppError::InvalidRegion)` (add `InvalidRegion` variant to `AppError`)
+- [X] T037 [P] [US3] Write unit tests in `src/capture/content_filter.rs`: `build_filter(FullScreen { display_id: 1 })` produces a filter with the correct display; `build_filter(Window { window_id: 42 })` produces a window filter; self-exclusion entry is always present in `excludingApplications`
+- [X] T038 [P] [US3] Write unit test: `build_filter(Area { rect })` with zero-width rect returns `Err(AppError::InvalidRegion)` (add `InvalidRegion` variant to `AppError`)
 
 ### Implementation for User Story 3
 
-- [ ] T039 [US3] Add `AppError::InvalidRegion(String)` variant to `src/error.rs`
-- [ ] T040 [US3] Implement `src/capture/content_filter.rs`: `list_displays() -> Result<Vec<SCDisplay>, AppError>`; `list_windows() -> Result<Vec<SCWindow>, AppError>`; `build_filter(region: &CaptureRegion) -> Result<SCContentFilter, AppError>` with self-exclusion and `InvalidRegion` validation for zero-size `Area` rect
-- [ ] T041 [US3] Update `CaptureEngine::start()` in `src/capture/engine.rs` to call `build_filter` with `settings.region` and pass result to `SCStream` initialization
-- [ ] T042 [US3] Implement region picker in `src/ui/settings_panel.rs`: Full Screen combo box (populated from `list_displays()` async call on panel open); Window combo box (populated from `list_windows()`); Area option (shows placeholder text referencing open-question status); entire picker disabled while `RecordingStatus ≠ Idle`
-- [ ] T043 [US3] Populate display/window lists asynchronously in `src/app.rs` on startup (after permission check); store in `AppState`; refresh when settings panel opens
+- [X] T039 [US3] Add `AppError::InvalidRegion(String)` variant to `src/error.rs`
+- [X] T040 [US3] Implement `src/capture/content_filter.rs`: `list_displays() -> Result<Vec<SCDisplay>, AppError>`; `list_windows() -> Result<Vec<SCWindow>, AppError>`; `build_filter(region: &CaptureRegion) -> Result<SCContentFilter, AppError>` with self-exclusion and `InvalidRegion` validation for zero-size `Area` rect
+- [X] T041 [US3] Update `CaptureEngine::start()` in `src/capture/engine.rs` to call `build_filter` with `settings.region` and pass result to `SCStream` initialization
+- [X] T042 [US3] Implement region picker in `src/ui/settings_panel.rs`: Full Screen combo box (populated from `list_displays()` async call on panel open); Window combo box (populated from `list_windows()`); Area option (shows placeholder text referencing open-question status); entire picker disabled while `RecordingStatus ≠ Idle`
+- [X] T043 [US3] Populate display/window lists asynchronously in `src/app.rs` on startup (after permission check); store in `AppState`; refresh when settings panel opens
 
 **Checkpoint**: Selecting Full Screen and pressing Start records the correct display; selecting a Window records only that window.
 

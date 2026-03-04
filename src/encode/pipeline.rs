@@ -67,6 +67,9 @@ impl EncodingPipeline {
     /// * `video_rx` – receives video [`screencapturekit::cm::CMSampleBuffer`]s
     ///   from `CaptureEngine`.
     /// * `audio_rx` – receives audio sample buffers from `CaptureEngine`.
+    /// * `width` / `height` – actual capture dimensions returned by
+    ///   [`CaptureEngine::start`].  Must be non-zero; passing zero would cause
+    ///   `AVAssetWriterInput` to throw a fatal Objective-C exception.
     ///
     /// # Errors
     ///
@@ -75,12 +78,15 @@ impl EncodingPipeline {
         settings: &RecordingSettings,
         video_rx: mpsc::Receiver<screencapturekit::CMSampleBuffer>,
         audio_rx: mpsc::Receiver<screencapturekit::CMSampleBuffer>,
+        width: u32,
+        height: u32,
     ) -> Result<Self, AppError> {
         let mut temp = TempFile::new()?;
         let output_path = temp.path().to_path_buf();
 
         let bitrate = settings.quality.bitrate_bps();
-        let (width, height) = resolution_px(settings);
+        // `width` and `height` are provided by the caller (from CaptureEngine::start)
+        // and are guaranteed to be the actual SCStream dimensions — never zero.
         let (result_tx, result_rx) = oneshot::channel::<Result<PathBuf, AppError>>();
 
         let task = tokio::task::spawn_blocking(move || {
@@ -300,19 +306,6 @@ unsafe fn sc_buf_to_retained(
     let raw = sc_buf.as_ptr().cast::<ObjcCMSampleBuffer>();
     // SAFETY: raw is non-null when screencapturekit delivers a valid buffer.
     Retained::retain(raw)
-}
-
-/// Resolves output pixel dimensions from recording settings.
-const fn resolution_px(settings: &RecordingSettings) -> (u32, u32) {
-    use crate::config::settings::Resolution;
-    match settings.resolution {
-        // For Native resolution, CaptureEngine obtains actual display dims;
-        // the pipeline uses zero here as a placeholder — the SCStream
-        // already delivers frames at the correct native resolution.
-        Resolution::Native => (0, 0),
-        Resolution::P1080 => (1920, 1080),
-        Resolution::P720 => (1280, 720),
-    }
 }
 
 /// Builds the H.264 / `VideoToolbox` settings dictionary:

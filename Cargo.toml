@@ -72,6 +72,10 @@ tempfile = "3"
 # and screen-recording / microphone permissions.
 integration = []
 
+# Enable sub-region (Area) capture via SCContentFilter::set_content_rect.
+# Requires macOS 14.2 SDK and runtime.
+macos_14_2 = ["screencapturekit/macos_14_2"]
+
 # ---------------------------------------------------------------------------
 # Build profiles
 # ---------------------------------------------------------------------------

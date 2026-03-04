@@ -54,4 +54,11 @@ pub enum AppError {
     /// non-blocking banner in the UI.
     #[error("Microphone unavailable — recording will continue with video only")]
     MicrophoneUnavailable,
+
+    /// The requested capture region is geometrically invalid.
+    ///
+    /// Common cause: an [`Area`](crate::config::settings::CaptureRegion::Area)
+    /// rect with zero or negative `width` / `height`.
+    #[error("Invalid capture region: {0}")]
+    InvalidRegion(String),
 }
