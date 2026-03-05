@@ -389,3 +389,54 @@ adaptor.appendPixelBuffer_withPresentationTime(&retained_pix, pts)
 
 This keeps timing intact while avoiding metadata incompatibility that was
 triggering `AVAssetWriterStatusFailed`.
+
+---
+
+## Issue 9 — Accept 后卡在 `Saving`，未弹出保存对话框且只保留临时文件
+
+**Commit:** `031136a`
+**Files:** `src/app.rs`, `src/ui/main_window.rs`
+
+### Symptom
+
+用户在 Preview 点击 `Accept` 后，UI 状态进入 `Saving…` 并停留不动，
+没有出现保存路径选择对话框。录制文件仍停留在临时目录，例如：
+
+```
+/var/folders/.../T/screen-recorder/<uuid>.mp4
+```
+
+### Root Cause
+
+`RecorderCommand::Accept` 分支原先只做了状态切换：
+
+```rust
+s.recording_status = RecordingStatus::Saving;
+```
+
+但并未执行任何实际保存动作（无文件对话框、无文件移动、无状态收敛），
+导致 UI 看起来“卡死在 Saving”，而临时文件从未落盘到用户目标路径。
+
+### Fix
+
+在 `command_loop` 的 `RecorderCommand::Accept` 中补齐完整保存流程：
+
+1. 进入 `Saving` 后，通过 `rfd::FileDialog::save_file()` 弹出保存对话框；
+2. 用户取消保存时，状态从 `Saving` 回到 `Previewing`；
+3. 用户确认路径后执行文件落盘：
+  - 优先 `tokio::fs::rename(src, dst)`；
+  - 若跨卷导致 rename 失败，回退 `copy + remove`；
+4. 保存成功后：
+  - 清空 `preview_path`；
+  - 状态切回 `Idle`；
+  - 清除错误；
+  - 更新并持久化 `settings.output_dir`；
+5. 新增成功提示 toast：
+  - `AppState` 增加 `success_toast: Option<(String, Instant)>`；
+  - 保存成功时设置提示文案；
+  - 在 `main_window` 右上角渲染 3 秒自动消失的绿色 toast。
+
+### Result
+
+`Accept` 现在会正常触发“选择保存位置 → 实际写入目标路径 → 返回 Idle”，
+不再卡在 `Saving`，并会给出保存成功的可见反馈。

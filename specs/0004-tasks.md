@@ -157,16 +157,16 @@ Must be 100% complete before any user story phase starts.
 
 ### Tests for User Story 5 (REQUIRED) ⚠️
 
-- [ ] T051 [P] [US5] Write unit test in `src/output/save.rs`: `generate_filename()` returns string matching `screen-recording-YYYY-MM-DD-HH-MM-SS.mp4` format using regex; timestamps differ across consecutive calls
-- [ ] T052 [P] [US5] Write integration test `tests/save_roundtrip.rs`: create temp file → `finalize(src, dst_dir, name)` → assert file exists at destination and source is gone; simulate cross-volume by copying to a different temp dir and asserting fallback copy+delete path works
+- [X] T051 [P] [US5] Write unit test in `src/output/save.rs`: `generate_filename()` returns string matching `screen-recording-YYYY-MM-DD-HH-MM-SS.mp4` format using regex; timestamps differ across consecutive calls
+- [X] T052 [P] [US5] Write integration test `tests/save_roundtrip.rs`: create temp file → `finalize(src, dst_dir, name)` → assert file exists at destination and source is gone; simulate cross-volume by copying to a different temp dir and asserting fallback copy+delete path works
 
 ### Implementation for User Story 5
 
-- [ ] T053 [US5] Implement `src/output/save.rs`: `generate_filename() -> String` using `std::time::SystemTime` formatted as `screen-recording-YYYY-MM-DD-HH-MM-SS.mp4`; `finalize(src: &Path, dst_dir: &Path, name: &str) -> Result<PathBuf, AppError>` using `std::fs::rename`, falling back to `std::fs::copy` + `std::fs::remove_file` on `EXDEV` cross-volume error
-- [ ] T054 [US5] Implement "Show in Finder" action in `src/output/save.rs`: `reveal_in_finder(path: &Path) -> Result<(), AppError>` via `NSWorkspace::activateFileViewerSelectingURLs` wrapped with `objc2`
-- [ ] T055 [US5] Implement `src/ui/save_panel.rs`: shown when `RecordingStatus == Saving`; displays current `output_dir`; "Change Folder" button triggers `rfd::AsyncFileDialog::pick_folder`, updates `settings.output_dir`, persists via `save_settings`; "Save" button calls `output::save::finalize` then `reveal_in_finder`
-- [ ] T056 [US5] Add completion toast to `src/ui/save_panel.rs`: after successful save, display final file path for 5 s via timed egui label (`request_repaint_after`); include "Show in Finder" hyperlink button
-- [ ] T057 [US5] Handle `AppError::Io` in `src/app.rs` save path: render modal dialog with OS error message and "Retry" button that re-invokes `finalize`
+- [X] T053 [US5] Implement `src/output/save.rs`: `generate_filename() -> String` using `std::time::SystemTime` formatted as `screen-recording-YYYY-MM-DD-HH-MM-SS.mp4`; `finalize(src: &Path, dst_dir: &Path, name: &str) -> Result<PathBuf, AppError>` using `std::fs::rename`, falling back to `std::fs::copy` + `std::fs::remove_file` on `EXDEV` cross-volume error
+- [X] T054 [US5] Implement "Show in Finder" action in `src/output/save.rs`: `reveal_in_finder(path: &Path) -> Result<(), AppError>` via `NSWorkspace::activateFileViewerSelectingURLs` wrapped with `objc2`
+- [X] T055 [US5] Implement `src/ui/save_panel.rs`: shown when `RecordingStatus == Saving`; displays current `output_dir`; "Change Folder" button triggers `rfd::AsyncFileDialog::pick_folder`, updates `settings.output_dir`, persists via `save_settings`; "Save" button calls `output::save::finalize` then `reveal_in_finder`
+- [X] T056 [US5] Add completion toast to `src/ui/save_panel.rs`: after successful save, display final file path for 5 s via timed egui label (`request_repaint_after`); include "Show in Finder" hyperlink button
+- [X] T057 [US5] Handle `AppError::Io` in `src/app.rs` save path: render modal dialog with OS error message and "Retry" button that re-invokes `finalize`
 
 **Checkpoint**: Full record → preview → save flow produces a valid MP4 at the chosen destination; Finder reveals the file; settings persist across app restarts.
 

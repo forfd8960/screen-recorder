@@ -58,6 +58,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # --- Utilities ---
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"                         # was spec "5"; current: 6.0.0
+time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 
 # ---------------------------------------------------------------------------
 # Dev / test dependencies

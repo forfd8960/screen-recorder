@@ -8,4 +8,5 @@
 
 pub mod main_window;
 pub mod preview_panel;
+pub mod save_panel;
 pub mod settings_panel;

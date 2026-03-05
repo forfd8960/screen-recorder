@@ -25,6 +25,7 @@ use crate::{
     config::settings::{RecordingSettings, load_settings, save_settings},
     encode::pipeline::EncodingPipeline,
     error::AppError,
+    output::save as output_save,
     ui::{main_window, preview_panel, settings_panel},
 };
 
@@ -68,7 +69,7 @@ impl RecordingStatus {
 // ---------------------------------------------------------------------------
 
 /// Commands sent from UI event handlers to the async [`command_loop`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RecorderCommand {
     /// Begin a capture session using the current settings.
     Start,
@@ -86,6 +87,8 @@ pub enum RecorderCommand {
     UpdateRegion(crate::config::settings::CaptureRegion),
     /// Refresh the available display and window lists (sent when settings panel opens).
     RefreshContent,
+    /// Update output directory in settings (used by save panel).
+    SetOutputDir(PathBuf),
 }
 
 // ---------------------------------------------------------------------------
@@ -165,12 +168,23 @@ pub struct AppState {
     pub preview_path: Option<PathBuf>,
     /// Most recent non-fatal error, displayed in the UI.
     pub last_error: Option<AppError>,
-    /// Most recent success toast message and the time it was created.
-    pub success_toast: Option<(String, Instant)>,
+    /// Most recent success toast shown by the UI.
+    pub success_toast: Option<SuccessToast>,
     /// Available displays, populated on startup and on settings-panel open.
     pub available_displays: Vec<DisplayInfo>,
     /// Available windows, populated on startup and on settings-panel open.
     pub available_windows: Vec<WindowInfo>,
+}
+
+/// Ephemeral success toast payload.
+#[derive(Debug, Clone)]
+pub struct SuccessToast {
+    /// Toast message shown to user.
+    pub message: String,
+    /// Saved file path for optional "Show in Finder" action.
+    pub saved_path: PathBuf,
+    /// Creation time used for auto-expire.
+    pub shown_at: Instant,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,12 +235,16 @@ impl eframe::App for App {
                 });
             }
 
-            // T047 – show preview panel when Previewing, main window otherwise.
+            // T047/T055 – show panel by state.
             if matches!(state.recording_status, RecordingStatus::Previewing) {
                 preview_panel::show(ctx, &state, &self.cmd_tx);
+            } else if matches!(state.recording_status, RecordingStatus::Saving) {
+                crate::ui::save_panel::show(ctx, &state, &self.cmd_tx);
             } else {
                 main_window::show(ctx, &state, &self.cmd_tx);
             }
+
+            crate::ui::save_panel::render_completion_toast(ctx, &state);
 
             // Settings panel (bottom) is always visible.
             settings_panel::show(ctx, &state, &self.cmd_tx);
@@ -375,72 +393,56 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
             // transition back to Idle once saving completes.
             RecorderCommand::Accept => {
                 let (preview_path, output_dir) = if let Ok(mut s) = state.lock() {
-                    if matches!(s.recording_status, RecordingStatus::Previewing) {
-                        let Some(path) = s.preview_path.clone() else {
-                            s.recording_status = RecordingStatus::Idle;
-                            s.last_error = Some(AppError::EncodingError(
-                                "no preview file available to save".to_string(),
-                            ));
+                    match s.recording_status {
+                        RecordingStatus::Previewing => {
+                            s.recording_status = RecordingStatus::Saving;
+                            s.last_error = None;
+                            info!("recording accepted — transitioning to Saving panel");
                             continue;
-                        };
-
-                        s.recording_status = RecordingStatus::Saving;
-                        info!(?path, "recording accepted — opening save dialog");
-                        (path, s.settings.output_dir.clone())
-                    } else {
-                        warn!("Accept command received outside Previewing state — ignoring");
-                        continue;
+                        }
+                        RecordingStatus::Saving => {
+                            let Some(path) = s.preview_path.clone() else {
+                                s.recording_status = RecordingStatus::Idle;
+                                s.last_error = Some(AppError::EncodingError(
+                                    "no preview file available to save".to_string(),
+                                ));
+                                continue;
+                            };
+                            (path, s.settings.output_dir.clone())
+                        }
+                        _ => {
+                            warn!(
+                                "Accept command received outside Previewing/Saving state — ignoring"
+                            );
+                            continue;
+                        }
                     }
                 } else {
                     error!("AppState poisoned — could not accept recording");
                     continue;
                 };
 
-                let suggested_name = preview_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map_or_else(|| "recording.mp4".to_string(), ToString::to_string);
-
-                let chosen_path = match tokio::task::spawn_blocking(move || {
-                    rfd::FileDialog::new()
-                        .set_title("Save Recording")
-                        .set_directory(&output_dir)
-                        .set_file_name(&suggested_name)
-                        .add_filter("MP4 Video", &["mp4"])
-                        .save_file()
-                })
-                .await
-                {
-                    Ok(path) => path,
-                    Err(e) => {
-                        error!("save dialog task failed: {e}");
-                        if let Ok(mut s) = state.lock() {
-                            s.recording_status = RecordingStatus::Previewing;
-                            s.last_error = Some(AppError::Io {
-                                source: std::io::Error::other(format!(
-                                    "save dialog task failed: {e}"
-                                )),
-                            });
+                let output_name = output_save::generate_filename();
+                let destination =
+                    match output_save::finalize(&preview_path, &output_dir, &output_name) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            error!(
+                                ?preview_path,
+                                ?output_dir,
+                                output_name,
+                                "failed to save recording: {e}"
+                            );
+                            if let Ok(mut s) = state.lock() {
+                                s.recording_status = RecordingStatus::Saving;
+                                s.last_error = Some(e);
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                };
+                    };
 
-                let Some(destination) = chosen_path else {
-                    info!("save canceled by user — returning to preview");
-                    if let Ok(mut s) = state.lock() {
-                        s.recording_status = RecordingStatus::Previewing;
-                    }
-                    continue;
-                };
-
-                if let Err(e) = move_recording_file(&preview_path, &destination).await {
-                    error!(?preview_path, ?destination, "failed to save recording: {e}");
-                    if let Ok(mut s) = state.lock() {
-                        s.recording_status = RecordingStatus::Previewing;
-                        s.last_error = Some(e);
-                    }
-                    continue;
+                if let Err(e) = output_save::reveal_in_finder(&destination) {
+                    warn!(?destination, "failed to reveal file in Finder: {e}");
                 }
 
                 if let Some(parent) = destination.parent()
@@ -456,16 +458,32 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                     s.preview_path = None;
                     s.recording_status = RecordingStatus::Idle;
                     s.last_error = None;
-                    s.success_toast = Some((
-                        format!("Saved recording to {}", destination.display()),
-                        Instant::now(),
-                    ));
+                    s.success_toast = Some(SuccessToast {
+                        message: format!("Saved recording to {}", destination.display()),
+                        saved_path: destination.clone(),
+                        shown_at: Instant::now(),
+                    });
                     info!(?destination, "recording saved and returned to Idle");
                 }
             }
 
+            RecorderCommand::SetOutputDir(dir) => {
+                if let Ok(mut s) = state.lock() {
+                    s.settings.output_dir = dir;
+                    match save_settings(&s.settings) {
+                        Ok(()) => {
+                            if matches!(s.recording_status, RecordingStatus::Saving) {
+                                s.last_error = None;
+                            }
+                        }
+                        Err(e) => {
+                            s.last_error = Some(e);
+                        }
+                    }
+                }
+            }
+
             // T049 – Discard: clean up temp file (best-effort) and return to Idle.
-            // Note: handle_discard() in preview_panel may have already deleted
             // the file when triggered from a button click; the attempt here is
             // a safety net for keyboard-shortcut paths and future callers.
             RecorderCommand::Discard => {
@@ -555,28 +573,4 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
     }
 
     info!("command_loop exited — channel closed");
-}
-
-async fn move_recording_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), AppError> {
-    if let Some(parent) = dst.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    match tokio::fs::rename(src, dst).await {
-        Ok(()) => Ok(()),
-        Err(rename_err) => {
-            // Cross-volume moves can fail with EXDEV. Fallback to copy+remove.
-            match tokio::fs::copy(src, dst).await {
-                Ok(_) => {
-                    tokio::fs::remove_file(src).await?;
-                    Ok(())
-                }
-                Err(copy_err) => Err(AppError::Io {
-                    source: std::io::Error::other(format!(
-                        "rename failed: {rename_err}; copy fallback failed: {copy_err}"
-                    )),
-                }),
-            }
-        }
-    }
 }
