@@ -173,3 +173,165 @@ passing buffers to `AVAssetWriterInput`.
 // then appendSampleBuffer to an audio AVAssetWriterInput.
 while audio_rx.try_recv().is_ok() { /* discard */ }
 ```
+
+
+---
+
+## Issue 5 -- TCC Screen Recording Permission Lost After Every Recompile
+
+**Phase:** Phase 4 (T030-T036)
+**Files:** `Makefile`
+
+### Symptom
+
+After granting Screen Recording permission in System Settings -> Privacy & Security,
+the app still displayed the "Screen Recording permission denied" banner on the next
+launch. Re-enabling the toggle in System Settings had no lasting effect -- each new
+`cargo build` resulted in another permission denial.
+
+### Root Cause
+
+macOS TCC (Transparency, Consent, and Control) tracks **unsigned binaries** by
+their SHA-256 content hash rather than by a stable bundle identifier. Every
+`cargo build` produces a new binary with a different hash, which TCC treats as
+a completely different, untrusted application. As a result the previously granted
+permission no longer applied to the newly compiled binary.
+
+Confirmed with:
+
+    $ codesign -dv target/release/screen-recorder
+    screen-recorder: code object is not signed at all
+
+### Fix
+
+Ad-hoc code-sign the binary with a stable bundle identifier after every build
+so that TCC tracks the app by identifier instead of hash:
+
+    codesign --sign - --identifier "com.forfd8960.screen-recorder" --force target/release/screen-recorder
+
+Updated `Makefile` to run `codesign` automatically after `cargo build` and
+`cargo build --release`. New targets added: `sign-debug`, `sign-release`, `reset-tcc`.
+
+**Recovery steps (one-time after applying the fix):**
+1. Run `tccutil reset ScreenCapture` to clear all stale TCC entries.
+2. Run `make build-release` -- binary is now signed on every build.
+3. Launch the app and grant Screen Recording once in System Settings.
+4. Permission now persists across all subsequent recompiles.
+
+
+---
+
+## Issue 5 -- TCC Screen Recording Permission Lost After Every Recompile
+
+**Phase:** Phase 4 (T030-T036)
+**Files:** `Makefile`
+
+### Symptom
+
+After granting Screen Recording permission in System Settings -> Privacy & Security,
+the app still displayed the "Screen Recording permission denied" banner on the next
+launch. Re-enabling the toggle in System Settings had no lasting effect -- each new
+`cargo build` resulted in another permission denial.
+
+### Root Cause
+
+macOS TCC (Transparency, Consent, and Control) tracks **unsigned binaries** by
+their SHA-256 content hash rather than by a stable bundle identifier. Every
+`cargo build` produces a new binary with a different hash, which TCC treats as
+a completely different, untrusted application. As a result the previously granted
+permission no longer applied to the newly compiled binary.
+
+Confirmed with:
+
+    $ codesign -dv target/release/screen-recorder
+    screen-recorder: code object is not signed at all
+
+### Fix
+
+Ad-hoc code-sign the binary with a stable bundle identifier after every build
+so that TCC tracks the app by identifier instead of hash:
+
+    codesign --sign - --identifier "com.forfd8960.screen-recorder" --force target/release/screen-recorder
+
+Updated `Makefile` to run `codesign` automatically after `cargo build` and
+`cargo build --release`. New targets added: `sign-debug`, `sign-release`, `reset-tcc`.
+
+**Recovery steps (one-time after applying the fix):**
+1. Run `tccutil reset ScreenCapture` to clear all stale TCC entries.
+2. Run `make build-release` -- binary is now signed on every build.
+3. Launch the app and grant Screen Recording once in System Settings.
+4. Permission now persists across all subsequent recompiles.
+
+---
+
+## Issue 5 — `AVErrorUnknown` (-11800) caused by `startSessionAtSourceTime` gated behind `isReadyForMoreMediaData`
+
+**Commit:** `8669041`
+**Files:** `src/capture/engine.rs`, `src/encode/pipeline.rs`
+
+### Symptom
+
+```
+WARN  frame dropped — video channel full
+WARN  frame dropped — audio channel full stream="audio"
+ERROR failed to stop recording: Encoding pipeline error: AVAssetWriter
+      finishWriting failed: NSError { code: -11800,
+      localizedDescription: "The operation could not be completed",
+      domain: "AVFoundationErrorDomain", ... }
+```
+
+Heavy frame drops on both channels immediately before Stop, followed by
+the same `-11800` error on `finishWritingWithCompletionHandler`.
+
+### Root Cause
+
+Two compounding problems:
+
+1. **Session never started** — `startSessionAtSourceTime` was placed inside
+   the `if video_input.isReadyForMoreMediaData() && let Some(retained) = ...`
+   double-guard. `AVAssetWriterInput` is typically *not* ready for the first
+   few frames while the encoder warms up. When those frames arrived before
+   the input became ready, the entire branch was skipped — including the
+   `session_started = true` assignment. The write loop eventually exited
+   with `session_started == false`, and calling
+   `finishWritingWithCompletionHandler` on a writer that never had an active
+   session produces `AVErrorUnknown (-11800)`.
+
+2. **Channel capacity too small** — `CHANNEL_CAPACITY` was 120 (~2 s at
+   60 fps). SCKit starts delivering frames immediately after
+   `start_capture()`, while the encoding thread is still constructing
+   `AVAssetWriter` / `AVAssetWriterInput` / calling `startWriting()`. The
+   120-frame ring fills during this initialisation window, producing the
+   "frame dropped" flood.
+
+### Fix
+
+**`src/encode/pipeline.rs`** — decouple session start from readiness check:
+
+```rust
+// Always anchor the session on the first valid retained frame,
+// independent of isReadyForMoreMediaData.
+if !session_started {
+    let first_pts = retained.presentation_time_stamp();
+    writer.startSessionAtSourceTime(first_pts);
+    session_started = true;
+}
+
+// Only the append is gated on readiness.
+if video_input.isReadyForMoreMediaData() {
+    frame_count += 1;
+    if !video_input.appendSampleBuffer(&retained) { ... }
+}
+```
+
+Also added a finalize guard: if `session_started == false` when the loop
+exits (zero valid frames received), return a clear error immediately
+instead of calling `finishWritingWithCompletionHandler` on an unstarted
+writer.
+
+**`src/capture/engine.rs`** — increased channel capacity:
+
+```rust
+// Before: const CHANNEL_CAPACITY: usize = 120;   // ~2 s @ 60 fps
+const CHANNEL_CAPACITY: usize = 480;               // ~4 s @ 60 fps
+```
