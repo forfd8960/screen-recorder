@@ -27,8 +27,10 @@ objc2-av-foundation = { version = "0.3", features = [
     "AVVideoSettings",
     "AVAudioSettings",
     "objc2-core-media",
+    "objc2-core-video",
 ] }
 objc2-core-media    = { version = "0.3", features = ["CMSampleBuffer", "CMTime"] }
+objc2-core-video    = { version = "0.3", features = ["CVPixelBuffer", "CVPixelBufferPool"] }
 objc2-foundation    = { version = "0.3", features = ["NSDictionary", "NSError", "NSString", "NSURL"] }
 core-foundation     = "0.10"       # current: 0.10.1
 core-graphics       = "0.25"       # was spec "0.24"; current: 0.25.0

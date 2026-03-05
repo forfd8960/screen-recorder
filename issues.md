@@ -221,50 +221,7 @@ Updated `Makefile` to run `codesign` automatically after `cargo build` and
 
 ---
 
-## Issue 5 -- TCC Screen Recording Permission Lost After Every Recompile
-
-**Phase:** Phase 4 (T030-T036)
-**Files:** `Makefile`
-
-### Symptom
-
-After granting Screen Recording permission in System Settings -> Privacy & Security,
-the app still displayed the "Screen Recording permission denied" banner on the next
-launch. Re-enabling the toggle in System Settings had no lasting effect -- each new
-`cargo build` resulted in another permission denial.
-
-### Root Cause
-
-macOS TCC (Transparency, Consent, and Control) tracks **unsigned binaries** by
-their SHA-256 content hash rather than by a stable bundle identifier. Every
-`cargo build` produces a new binary with a different hash, which TCC treats as
-a completely different, untrusted application. As a result the previously granted
-permission no longer applied to the newly compiled binary.
-
-Confirmed with:
-
-    $ codesign -dv target/release/screen-recorder
-    screen-recorder: code object is not signed at all
-
-### Fix
-
-Ad-hoc code-sign the binary with a stable bundle identifier after every build
-so that TCC tracks the app by identifier instead of hash:
-
-    codesign --sign - --identifier "com.forfd8960.screen-recorder" --force target/release/screen-recorder
-
-Updated `Makefile` to run `codesign` automatically after `cargo build` and
-`cargo build --release`. New targets added: `sign-debug`, `sign-release`, `reset-tcc`.
-
-**Recovery steps (one-time after applying the fix):**
-1. Run `tccutil reset ScreenCapture` to clear all stale TCC entries.
-2. Run `make build-release` -- binary is now signed on every build.
-3. Launch the app and grant Screen Recording once in System Settings.
-4. Permission now persists across all subsequent recompiles.
-
----
-
-## Issue 5 — `AVErrorUnknown` (-11800) caused by `startSessionAtSourceTime` gated behind `isReadyForMoreMediaData`
+## Issue 6 — `AVErrorUnknown` (-11800) caused by `startSessionAtSourceTime` gated behind `isReadyForMoreMediaData`
 
 **Commit:** `8669041`
 **Files:** `src/capture/engine.rs`, `src/encode/pipeline.rs`
@@ -335,3 +292,100 @@ writer.
 // Before: const CHANNEL_CAPACITY: usize = 120;   // ~2 s @ 60 fps
 const CHANNEL_CAPACITY: usize = 480;               // ~4 s @ 60 fps
 ```
+
+---
+
+## Issue 7 — `finishWritingWithCompletionHandler` called on already-Failed writer after Stop
+
+**File:** `src/encode/pipeline.rs`
+
+### Symptom
+
+```
+WARN  frame dropped — video channel full
+WARN  frame dropped — audio channel full stream="audio"
+INFO  SCStream stopped
+ERROR failed to stop recording: Encoding pipeline error: AVAssetWriter
+    finishWriting failed: NSError { code: -11800,
+    localizedDescription: "The operation could not be completed",
+    domain: "AVFoundationErrorDomain", ... }
+```
+
+The error was reported when Stop was clicked, but the writer had already
+entered `Failed` state during recording.
+
+### Root Cause
+
+When `appendSampleBuffer` / `appendPixelBuffer` returned `false`, the loop
+exited, but finalize still called `markAsFinished()` +
+`finishWritingWithCompletionHandler:` unconditionally. Calling finish on a
+writer already in `AVAssetWriterStatusFailed` produces `AVErrorUnknown`
+(`-11800`).
+
+### Fix
+
+Added `append_failed: bool` and failure-aware finalize logic:
+
+```rust
+if append_failed || writer.status() == AVAssetWriterStatus::Failed {
+  let err_desc = writer
+    .error()
+    .map(|e| format!("{e:?}"))
+    .unwrap_or_else(|| format!("status={}", writer.status().0));
+  writer.cancelWriting();
+  return Err(AppError::EncodingError(format!(
+    "AVAssetWriter entered failed state during recording: {err_desc}"
+  )));
+}
+```
+
+Also, the `!session_started` guard now calls `cancelWriting()` before
+returning so partial files/resources are cleaned up in all early-fail paths.
+
+---
+
+## Issue 8 — `AVErrorUnknown` (`-11800`) caused by SCKit `CMSampleBuffer` metadata extensions
+
+**Files:** `Cargo.toml`, `src/encode/pipeline.rs`
+
+### Symptom
+
+```
+INFO  received recorder command cmd=Stop
+INFO  SCStream stopped
+ERROR failed to stop recording: Encoding pipeline error: AVAssetWriter
+    entered failed state during recording: NSError { code: -11800,
+    localizedDescription: "The operation could not be completed",
+    domain: "AVFoundationErrorDomain", ... }
+```
+
+After Issue 7, finalize behavior was correct, but the writer still failed on
+the first frame append.
+
+### Root Cause
+
+`ScreenCaptureKit` `CMSampleBuffer` carries proprietary frame attachments
+(dirty rects, display time, content scale, content rect, etc.). Passing the
+full sample buffer directly to `AVAssetWriterInput.appendSampleBuffer` can
+cause VideoToolbox/H.264 to reject the frame and flip writer status to
+`Failed` with `-11800`.
+
+### Fix
+
+Switched from sample-buffer append to pixel-buffer append using
+`AVAssetWriterInputPixelBufferAdaptor`, which bypasses SCKit-specific sample
+attachments:
+
+1. Added `objc2-core-video` support in dependencies.
+2. Created adaptor from `video_input`.
+3. Extracted `CVPixelBuffer` + PTS from SCKit buffer and appended via:
+
+```rust
+adaptor.appendPixelBuffer_withPresentationTime(&retained_pix, pts)
+```
+
+4. Added a toll-free bridge helper from
+`screencapturekit::cv::CVPixelBuffer` to `objc2_core_video::CVPixelBuffer`.
+
+This keeps timing intact while avoiding metadata incompatibility that was
+triggering `AVAssetWriterStatusFailed`.

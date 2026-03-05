@@ -29,11 +29,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
-    AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo,
-    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264,
-    AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoWidthKey,
+    AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor, AVAssetWriterStatus,
+    AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey, AVVideoCodecKey,
+    AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoWidthKey,
 };
-use objc2_core_media::CMSampleBuffer as ObjcCMSampleBuffer;
+use objc2_core_video::CVPixelBuffer as ObjcCVPixelBuffer;
 use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -172,6 +172,29 @@ fn run_encoding_thread(
             Some(&*video_settings),
         );
         video_input.setExpectsMediaDataInRealTime(true);
+        writer.addInput(&video_input);
+
+        // ---------------------------------------------------------------- //
+        // 3b. Pixel buffer adaptor                                         //
+        //                                                                   //
+        //     SCKit CMSampleBuffers carry ScreenCapture-specific metadata   //
+        //     extensions (dirty rects, display time, content scale, etc.).  //
+        //     When those buffers are passed directly to                     //
+        //     AVAssetWriterInput.appendSampleBuffer, the H.264 encoder      //
+        //     chokes on the unknown extensions and returns AVErrorUnknown   //
+        //     (-11800), putting the writer into AVAssetWriterStatusFailed.  //
+        //                                                                   //
+        //     The correct approach is to extract the raw CVPixelBuffer from //
+        //     the CMSampleBuffer and feed it through                        //
+        //     AVAssetWriterInputPixelBufferAdaptor, which bypasses the      //
+        //     sample-level metadata entirely.                               //
+        // ---------------------------------------------------------------- //
+        let adaptor =
+            AVAssetWriterInputPixelBufferAdaptor::
+                assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes(
+                    &video_input,
+                    None, // let AVFoundation decide the pool format
+                );
 
         // ---------------------------------------------------------------- //
         // 4.  Audio NOTE — not added to writer in this phase.
@@ -189,7 +212,6 @@ fn run_encoding_thread(
         //     in Phase 8.  Until then, the encoder is video-only and audio
         //     buffers received from the capture engine are drained and discarded.
         // ---------------------------------------------------------------- //
-        writer.addInput(&video_input);
         // NOTE: audio input not added — see Phase 8 comment above.
 
         // ---------------------------------------------------------------- //
@@ -210,6 +232,11 @@ fn run_encoding_thread(
         // ---------------------------------------------------------------- //
         let mut frame_count = 0u64;
         let mut session_started = false;
+        // Tracks whether the loop was broken by an appendSampleBuffer failure
+        // rather than a normal channel-close.  If true we must cancel the
+        // writer instead of calling finishWritingWithCompletionHandler, which
+        // would itself fail with AVErrorUnknown (-11800) on a Failed writer.
+        let mut append_failed = false;
 
         loop {
             // --- Drain (and discard) audio channel ---
@@ -219,33 +246,59 @@ fn run_encoding_thread(
 
             // --- Wait for next video frame (blocking) ---
             if let Some(vb) = video_rx.blocking_recv() {
-                // sc_buf_to_retained may return None if the underlying
-                // CMSampleBufferRef is null or already invalid.
-                let Some(retained) = sc_buf_to_retained(&vb) else {
-                    continue;
+                // Extract the raw CVPixelBuffer and the presentation timestamp
+                // from the screencapturekit CMSampleBuffer.  We bypass
+                // appendSampleBuffer entirely to avoid the SCKit-specific
+                // metadata extensions that cause AVErrorUnknown (-11800).
+                let sc_pts = vb.presentation_timestamp();
+                let pts_value = sc_pts.value;
+                let pts_timescale = sc_pts.timescale;
+
+                // Build a CMTime compatible with objc2_core_media.
+                let pts = objc2_core_media::CMTime {
+                    value: pts_value,
+                    timescale: pts_timescale,
+                    flags: objc2_core_media::CMTimeFlags(1), // kCMTimeFlags_Valid
+                    epoch: 0,
                 };
 
-                // Anchor the writing session to the first frame's real
-                // presentation timestamp.  This must happen BEFORE the first
-                // appendSampleBuffer call and independently of
-                // isReadyForMoreMediaData: gating it on readiness means the
-                // session is never started when the encoder is still warming
-                // up, causing finishWritingWithCompletionHandler to fail with
-                // AVErrorUnknown (-11800).
+                // Anchor the writing session to the first frame's real PTS.
+                // Must happen BEFORE the first appendPixelBuffer call.
                 if !session_started {
-                    let first_pts = retained.presentation_time_stamp();
-                    writer.startSessionAtSourceTime(first_pts);
+                    writer.startSessionAtSourceTime(pts);
                     session_started = true;
                 }
 
+                // Get the CVPixelBuffer from the screencapturekit CMSampleBuffer.
+                let Some(sc_pixel_buf) = vb.image_buffer() else {
+                    // Frame has no pixel data (e.g. status-only frame) — skip.
+                    continue;
+                };
+
+                // Toll-free bridge: screencapturekit's CVPixelBuffer is the
+                // same CF object as objc2_core_video::CVPixelBuffer.  We
+                // retain to keep the buffer alive for the duration of this
+                // call, balancing screencapturekit's own retain on the buffer.
+                let Some(retained_pix) = sc_pixel_buf_to_objc(&sc_pixel_buf) else {
+                    continue;
+                };
+
                 if video_input.isReadyForMoreMediaData() {
                     frame_count += 1;
-                    if !video_input.appendSampleBuffer(&retained) {
-                        // Writer entered a failed state; surface error below.
+                    if !adaptor.appendPixelBuffer_withPresentationTime(&retained_pix, pts) {
+                        // Writer entered a failed state.  Log the underlying
+                        // AVFoundation error before breaking so we have full
+                        // context in the log.
+                        let writer_err = writer
+                            .error()
+                            .map(|e| format!("{e:?}"))
+                            .unwrap_or_else(|| format!("status={}", writer.status().0));
                         warn!(
                             frame_count,
-                            "appendSampleBuffer returned false — breaking write loop"
+                            writer_err,
+                            "appendPixelBuffer returned false — writer entered failed state"
                         );
+                        append_failed = true;
                         break;
                     }
                 }
@@ -273,10 +326,32 @@ fn run_encoding_thread(
         // never started.  finishWritingWithCompletionHandler on an unstarted
         // writer produces AVErrorUnknown (-11800), so fail fast instead.
         if !session_started {
+            // If the writer was started (startWriting succeeded) but no session
+            // was begun, cancel to release the file and any internal resources.
+            writer.cancelWriting();
             return Err(AppError::EncodingError(
                 "no video frames were written — recording session was never started".into(),
             ));
         }
+
+        // If the write loop exited because appendSampleBuffer put the writer
+        // into a Failed state, calling finishWritingWithCompletionHandler would
+        // itself fail with AVErrorUnknown (-11800).  Instead we call
+        // cancelWriting() for proper cleanup (it also deletes the partial
+        // output file) and surface the writer's underlying error.
+        if append_failed || writer.status() == AVAssetWriterStatus::Failed {
+            let err_desc = writer
+                .error()
+                .map(|e| format!("{e:?}"))
+                .unwrap_or_else(|| format!("status={}", writer.status().0));
+            // cancelWriting is a no-op when already Failed, but still
+            // triggers internal cleanup and deletes any partial output file.
+            writer.cancelWriting();
+            return Err(AppError::EncodingError(format!(
+                "AVAssetWriter entered failed state during recording: {err_desc}"
+            )));
+        }
+
         video_input.markAsFinished();
 
         // Use the non-deprecated async completion-handler API so that
@@ -317,24 +392,31 @@ fn run_encoding_thread(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Converts a `screencapturekit` [`CMSampleBuffer`] (wrapping a raw
-/// `CMSampleBufferRef`) into a `Retained<objc2_core_media::CMSampleBuffer>`
-/// suitable for `AVAssetWriterInput::appendSampleBuffer`.
+/// Toll-free bridges a `screencapturekit` `CVPixelBuffer` (a
+/// `*mut c_void` wrapping a `CVPixelBufferRef`) into an
+/// `objc2_core_video::CVPixelBuffer` suitable for
+/// `AVAssetWriterInputPixelBufferAdaptor::appendPixelBuffer:withPresentationTime:`.
+///
+/// We pass the raw pixel buffer *directly* without adding SCKit-specific
+/// metadata extensions, which is what caused `AVErrorUnknown (-11800)` when
+/// using `appendSampleBuffer` with the full `CMSampleBuffer`.
 ///
 /// # Safety
 ///
-/// * The `CMSampleBufferRef` underlying both types is the same CF object.
-/// * `Retained::retain` increments the reference count, balancing the `Drop`
-///   impl of `screencapturekit::CMSampleBuffer`.
-/// * The pointer is non-null whenever the screencapturekit callback delivers
-///   a valid buffer.
-unsafe fn sc_buf_to_retained(
-    sc_buf: &screencapturekit::CMSampleBuffer,
-) -> Option<Retained<ObjcCMSampleBuffer>> {
-    // SAFETY: toll-free bridge — CMSampleBufferRef is the same type underlying
-    // both wrappers. We retain to prevent premature deallocation.
-    let raw = sc_buf.as_ptr().cast::<ObjcCMSampleBuffer>();
-    // SAFETY: raw is non-null when screencapturekit delivers a valid buffer.
+/// * `CVPixelBufferRef` is a `CFTypeRef`-compatible opaque pointer.  Both
+///   screencapturekit and objc2_core_video ultimately point to the same CF
+///   object — the bridge is zero-cost.
+/// * `CFRetained::retain` increments the CF retain count and balances the
+///   `Drop` in screencapturekit's `CVPixelBuffer` wrapper.
+/// * The pointer is non-null whenever screencapturekit delivers a valid image
+///   buffer.
+unsafe fn sc_pixel_buf_to_objc(
+    sc_pix: &screencapturekit::cv::CVPixelBuffer,
+) -> Option<Retained<ObjcCVPixelBuffer>> {
+    // SAFETY: CVPixelBufferRef is a CFTypeRef-compatible opaque pointer.
+    // Both wrappers point to the same CF object.
+    let raw = sc_pix.as_ptr().cast::<ObjcCVPixelBuffer>();
+    // SAFETY: raw is non-null when screencapturekit delivers a valid pixel buffer.
     Retained::retain(raw)
 }
 
