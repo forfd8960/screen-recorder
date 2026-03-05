@@ -38,7 +38,11 @@ use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::{config::settings::RecordingSettings, encode::temp_file::TempFile, error::AppError};
+use crate::{
+    config::settings::{RecordingSettings, VideoQuality},
+    encode::temp_file::TempFile,
+    error::AppError,
+};
 
 // ---------------------------------------------------------------------------
 // EncodingPipeline
@@ -81,7 +85,7 @@ impl EncodingPipeline {
         let mut temp = TempFile::new()?;
         let output_path = temp.path().to_path_buf();
 
-        let bitrate = settings.quality.bitrate_bps();
+        let bitrate = bitrate_for_quality(settings.quality);
         // `width` and `height` are provided by the caller (from CaptureEngine::start)
         // and are guaranteed to be the actual SCStream dimensions — never zero.
         let (result_tx, result_rx) = oneshot::channel::<Result<PathBuf, AppError>>();
@@ -462,4 +466,25 @@ unsafe fn build_video_settings(
     );
 
     dict
+}
+
+#[must_use]
+const fn bitrate_for_quality(quality: VideoQuality) -> u32 {
+    match quality {
+        VideoQuality::High => 8_000_000,
+        VideoQuality::Medium => 4_000_000,
+        VideoQuality::Low => 2_000_000,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_bitrate_mapping_matches_spec() {
+        assert_eq!(bitrate_for_quality(VideoQuality::High), 8_000_000);
+        assert_eq!(bitrate_for_quality(VideoQuality::Medium), 4_000_000);
+        assert_eq!(bitrate_for_quality(VideoQuality::Low), 2_000_000);
+    }
 }

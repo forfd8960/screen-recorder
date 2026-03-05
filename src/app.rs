@@ -22,7 +22,7 @@ use crate::{
         engine::CaptureEngine,
         permissions::{check_mic_permission, check_screen_permission},
     },
-    config::settings::{RecordingSettings, load_settings, save_settings},
+    config::settings::{RecordingSettings, Resolution, VideoQuality, load_settings, save_settings},
     encode::pipeline::EncodingPipeline,
     error::AppError,
     output::save as output_save,
@@ -89,6 +89,12 @@ pub enum RecorderCommand {
     RefreshContent,
     /// Update output directory in settings (used by save panel).
     SetOutputDir(PathBuf),
+    /// Update resolution setting (used by settings panel).
+    UpdateResolution(Resolution),
+    /// Update FPS setting (used by settings panel).
+    UpdateFrameRate(u32),
+    /// Update quality setting (used by settings panel).
+    UpdateQuality(VideoQuality),
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +489,49 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                 }
             }
 
+            RecorderCommand::UpdateResolution(resolution) => {
+                if let Ok(mut s) = state.lock() {
+                    if s.recording_status.is_idle() {
+                        s.settings.resolution = resolution;
+                        if let Err(e) = save_settings(&s.settings) {
+                            s.last_error = Some(e);
+                        }
+                    } else {
+                        warn!("UpdateResolution ignored while recording is in progress");
+                    }
+                }
+            }
+
+            RecorderCommand::UpdateFrameRate(frame_rate) => {
+                if let Ok(mut s) = state.lock() {
+                    if s.recording_status.is_idle() {
+                        if [24_u32, 30, 60].contains(&frame_rate) {
+                            s.settings.frame_rate = frame_rate;
+                            if let Err(e) = save_settings(&s.settings) {
+                                s.last_error = Some(e);
+                            }
+                        } else {
+                            warn!(frame_rate, "invalid frame rate requested");
+                        }
+                    } else {
+                        warn!("UpdateFrameRate ignored while recording is in progress");
+                    }
+                }
+            }
+
+            RecorderCommand::UpdateQuality(quality) => {
+                if let Ok(mut s) = state.lock() {
+                    if s.recording_status.is_idle() {
+                        s.settings.quality = quality;
+                        if let Err(e) = save_settings(&s.settings) {
+                            s.last_error = Some(e);
+                        }
+                    } else {
+                        warn!("UpdateQuality ignored while recording is in progress");
+                    }
+                }
+            }
+
             // T049 – Discard: clean up temp file (best-effort) and return to Idle.
             // the file when triggered from a button click; the attempt here is
             // a safety net for keyboard-shortcut paths and future callers.
@@ -545,6 +594,9 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                     if s.recording_status.is_idle() {
                         info!(?region, "capture region updated");
                         s.settings.region = region;
+                        if let Err(e) = save_settings(&s.settings) {
+                            s.last_error = Some(e);
+                        }
                     } else {
                         warn!("UpdateRegion ignored while recording is in progress");
                     }

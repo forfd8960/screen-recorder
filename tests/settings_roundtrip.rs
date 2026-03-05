@@ -49,6 +49,29 @@ fn all_quality_variants_round_trip() {
 }
 
 #[test]
+fn recording_settings_round_trip_all_resolution_and_quality_combinations() {
+    for resolution in [Resolution::Native, Resolution::P1080, Resolution::P720] {
+        for quality in [VideoQuality::Low, VideoQuality::Medium, VideoQuality::High] {
+            let original = RecordingSettings {
+                resolution,
+                frame_rate: 30,
+                region: CaptureRegion::FullScreen { display_id: 1 },
+                capture_mic: true,
+                output_dir: PathBuf::from("/tmp/screen-recorder-tests"),
+                quality,
+            };
+
+            let json = serde_json::to_string(&original).expect("serialize");
+            let restored: RecordingSettings = serde_json::from_str(&json).expect("deserialize");
+
+            assert_eq!(restored.resolution, resolution);
+            assert_eq!(restored.quality, quality);
+            assert_eq!(restored.frame_rate, 30);
+        }
+    }
+}
+
+#[test]
 fn capture_region_all_variants_round_trip() {
     let variants: Vec<CaptureRegion> = vec![
         CaptureRegion::FullScreen { display_id: 0 },

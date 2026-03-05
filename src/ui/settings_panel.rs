@@ -20,7 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     app::{AppState, RecorderCommand},
-    config::settings::CaptureRegion,
+    config::settings::{CaptureRegion, Resolution, VideoQuality},
 };
 
 // ---------------------------------------------------------------------------
@@ -37,10 +37,85 @@ pub fn show(ctx: &egui::Context, state: &AppState, cmd_tx: &UnboundedSender<Reco
         .show(ctx, |ui| {
             ui.add_space(4.0);
             ui.collapsing("⚙ Recording Settings", |ui| {
+                render_video_output_controls(ui, state, cmd_tx);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
                 render_region_picker(ui, state, cmd_tx);
             });
             ui.add_space(4.0);
         });
+}
+
+fn render_video_output_controls(
+    ui: &mut Ui,
+    state: &AppState,
+    cmd_tx: &UnboundedSender<RecorderCommand>,
+) {
+    let is_idle = state.recording_status.is_idle();
+
+    ui.add_enabled_ui(is_idle, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Resolution:").strong());
+            ComboBox::from_id_salt("resolution_picker")
+                .selected_text(match state.settings.resolution {
+                    Resolution::Native => "Native",
+                    Resolution::P1080 => "1080p",
+                    Resolution::P720 => "720p",
+                })
+                .show_ui(ui, |ui| {
+                    for (label, value) in [
+                        ("Native", Resolution::Native),
+                        ("1080p", Resolution::P1080),
+                        ("720p", Resolution::P720),
+                    ] {
+                        let selected = state.settings.resolution == value;
+                        if ui.selectable_label(selected, label).clicked() && !selected {
+                            let _ = cmd_tx.send(RecorderCommand::UpdateResolution(value));
+                        }
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Frame Rate:").strong());
+            ComboBox::from_id_salt("fps_picker")
+                .selected_text(format!("{} FPS", state.settings.frame_rate))
+                .show_ui(ui, |ui| {
+                    for fps in [24_u32, 30, 60] {
+                        let selected = state.settings.frame_rate == fps;
+                        if ui
+                            .selectable_label(selected, format!("{fps} FPS"))
+                            .clicked()
+                            && !selected
+                        {
+                            let _ = cmd_tx.send(RecorderCommand::UpdateFrameRate(fps));
+                        }
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Quality:").strong());
+            for (label, value) in [
+                ("Low", VideoQuality::Low),
+                ("Medium", VideoQuality::Medium),
+                ("High", VideoQuality::High),
+            ] {
+                let selected = state.settings.quality == value;
+                if ui.selectable_label(selected, label).clicked() && !selected {
+                    let _ = cmd_tx.send(RecorderCommand::UpdateQuality(value));
+                }
+            }
+        });
+    });
+
+    if !is_idle {
+        ui.colored_label(
+            Color32::from_rgb(120, 120, 120),
+            "Resolution/FPS/Quality controls are disabled while recording.",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,9 @@ use std::sync::{
 use screencapturekit::{
     CMSampleBuffer,
     stream::{
-        SCStream, configuration::SCStreamConfiguration, output_trait::SCStreamOutputTrait,
+        SCStream,
+        configuration::{PixelFormat, SCStreamConfiguration},
+        output_trait::SCStreamOutputTrait,
         output_type::SCStreamOutputType,
     },
 };
@@ -38,13 +40,60 @@ use tracing::{debug, info, warn};
 
 use crate::{
     capture::{audio::audio_capture_params, content_filter},
-    config::settings::RecordingSettings,
+    config::settings::{RecordingSettings, Resolution},
     error::AppError,
 };
 
 // Channel capacity: buffer ~4 seconds at 60 fps (video) or ~90 s at 100 pkt/s
 // (audio) to absorb bursts while AVAssetWriter initialises on first start.
 const CHANNEL_CAPACITY: usize = 480;
+
+fn scaled_output_dimensions(
+    capture_width: u32,
+    capture_height: u32,
+    target_height: u32,
+) -> (u32, u32) {
+    if capture_width == 0 || capture_height == 0 {
+        return (target_height.max(1), target_height.max(1));
+    }
+
+    let width = ((u64::from(capture_width) * u64::from(target_height))
+        + (u64::from(capture_height) / 2))
+        / u64::from(capture_height);
+
+    #[allow(clippy::cast_possible_truncation)]
+    (width.max(1) as u32, target_height.max(1))
+}
+
+/// Builds `SCStreamConfiguration` from user settings and capture dimensions.
+#[must_use]
+pub fn build_stream_config(
+    settings: &RecordingSettings,
+    capture_width: u32,
+    capture_height: u32,
+) -> SCStreamConfiguration {
+    let (width, height) = match settings.resolution {
+        Resolution::Native => (capture_width.max(1), capture_height.max(1)),
+        Resolution::P1080 => scaled_output_dimensions(capture_width, capture_height, 1080),
+        Resolution::P720 => scaled_output_dimensions(capture_width, capture_height, 720),
+    };
+
+    let fps = match settings.frame_rate {
+        24 | 30 | 60 => settings.frame_rate,
+        _ => 30,
+    };
+
+    let (audio_enabled, audio_sample_rate, audio_channel_count) = audio_capture_params(settings);
+
+    SCStreamConfiguration::new()
+        .with_width(width)
+        .with_height(height)
+        .with_fps(fps)
+        .with_pixel_format(PixelFormat::YCbCr_420v)
+        .with_captures_audio(audio_enabled)
+        .with_sample_rate(audio_sample_rate)
+        .with_channel_count(audio_channel_count)
+}
 
 // ---------------------------------------------------------------------------
 // ChannelHandler
@@ -206,15 +255,9 @@ impl CaptureEngine {
                 // -----------------------------------------------------------------
                 // 2. Build stream configuration.
                 // -----------------------------------------------------------------
-                let (audio_enabled, audio_sample_rate, audio_channel_count) =
-                    audio_capture_params(&settings_clone);
-
-                let config = SCStreamConfiguration::new()
-                    .with_width(width)
-                    .with_height(height)
-                    .with_captures_audio(audio_enabled)
-                    .with_sample_rate(audio_sample_rate)
-                    .with_channel_count(audio_channel_count);
+                let config = build_stream_config(&settings_clone, width, height);
+                let output_width = config.width();
+                let output_height = config.height();
 
                 // -----------------------------------------------------------------
                 // 3. Create SCStream and register output handlers.
@@ -244,8 +287,13 @@ impl CaptureEngine {
                     .start_capture()
                     .map_err(|e| AppError::StreamCreation(format!("start_capture: {e:?}")))?;
 
-                info!(width, height, capture_audio, "SCStream started");
-                Ok((stream, width, height))
+                info!(
+                    width = output_width,
+                    height = output_height,
+                    capture_audio,
+                    "SCStream started"
+                );
+                Ok((stream, output_width, output_height))
             })
             .await
             .map_err(|e| AppError::StreamCreation(format!("spawn_blocking join: {e}")))??;
@@ -306,6 +354,7 @@ impl Default for CaptureEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::settings::{CaptureRegion, Resolution, VideoQuality};
 
     /// `CaptureEngine::new()` must return a valid engine and both receivers
     /// without panicking.
@@ -335,5 +384,29 @@ mod tests {
                 true
             }
         );
+    }
+
+    #[test]
+    fn build_stream_config_applies_resolution_fps_and_quality_mapping() {
+        let settings = RecordingSettings {
+            resolution: Resolution::P1080,
+            frame_rate: 24,
+            region: CaptureRegion::FullScreen { display_id: 0 },
+            capture_mic: true,
+            output_dir: std::path::PathBuf::from("/tmp"),
+            quality: VideoQuality::Low,
+        };
+
+        let config = build_stream_config(&settings, 2560, 1440);
+
+        assert_eq!(config.height(), 1080);
+        assert_eq!(config.width(), 1920);
+        assert_eq!(config.fps(), 24);
+        assert_eq!(config.pixel_format(), PixelFormat::YCbCr_420v);
+        assert!(config.captures_audio());
+        assert_eq!(settings.quality.bitrate_bps(), 2_000_000);
+
+        assert_eq!(VideoQuality::Medium.bitrate_bps(), 4_000_000);
+        assert_eq!(VideoQuality::High.bitrate_bps(), 8_000_000);
     }
 }
