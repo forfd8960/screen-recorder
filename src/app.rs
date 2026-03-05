@@ -22,7 +22,7 @@ use crate::{
         engine::CaptureEngine,
         permissions::{check_mic_permission, check_screen_permission},
     },
-    config::settings::{RecordingSettings, load_settings},
+    config::settings::{RecordingSettings, load_settings, save_settings},
     encode::pipeline::EncodingPipeline,
     error::AppError,
     ui::{main_window, preview_panel, settings_panel},
@@ -165,6 +165,8 @@ pub struct AppState {
     pub preview_path: Option<PathBuf>,
     /// Most recent non-fatal error, displayed in the UI.
     pub last_error: Option<AppError>,
+    /// Most recent success toast message and the time it was created.
+    pub success_toast: Option<(String, Instant)>,
     /// Available displays, populated on startup and on settings-panel open.
     pub available_displays: Vec<DisplayInfo>,
     /// Available windows, populated on startup and on settings-panel open.
@@ -332,6 +334,7 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                                 started_at: Instant::now(),
                             };
                             s.last_error = None;
+                            s.success_toast = None;
                             info!("recording started");
                         }
                     }
@@ -371,15 +374,93 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
             // Phase 7 (save_panel) will handle the actual file move and
             // transition back to Idle once saving completes.
             RecorderCommand::Accept => {
-                if let Ok(mut s) = state.lock() {
+                let (preview_path, output_dir) = if let Ok(mut s) = state.lock() {
                     if matches!(s.recording_status, RecordingStatus::Previewing) {
+                        let Some(path) = s.preview_path.clone() else {
+                            s.recording_status = RecordingStatus::Idle;
+                            s.last_error = Some(AppError::EncodingError(
+                                "no preview file available to save".to_string(),
+                            ));
+                            continue;
+                        };
+
                         s.recording_status = RecordingStatus::Saving;
-                        info!(?s.preview_path, "recording accepted — transitioning to Saving");
+                        info!(?path, "recording accepted — opening save dialog");
+                        (path, s.settings.output_dir.clone())
                     } else {
                         warn!("Accept command received outside Previewing state — ignoring");
+                        continue;
                     }
                 } else {
                     error!("AppState poisoned — could not accept recording");
+                    continue;
+                };
+
+                let suggested_name = preview_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or_else(|| "recording.mp4".to_string(), ToString::to_string);
+
+                let chosen_path = match tokio::task::spawn_blocking(move || {
+                    rfd::FileDialog::new()
+                        .set_title("Save Recording")
+                        .set_directory(&output_dir)
+                        .set_file_name(&suggested_name)
+                        .add_filter("MP4 Video", &["mp4"])
+                        .save_file()
+                })
+                .await
+                {
+                    Ok(path) => path,
+                    Err(e) => {
+                        error!("save dialog task failed: {e}");
+                        if let Ok(mut s) = state.lock() {
+                            s.recording_status = RecordingStatus::Previewing;
+                            s.last_error = Some(AppError::Io {
+                                source: std::io::Error::other(format!(
+                                    "save dialog task failed: {e}"
+                                )),
+                            });
+                        }
+                        continue;
+                    }
+                };
+
+                let Some(destination) = chosen_path else {
+                    info!("save canceled by user — returning to preview");
+                    if let Ok(mut s) = state.lock() {
+                        s.recording_status = RecordingStatus::Previewing;
+                    }
+                    continue;
+                };
+
+                if let Err(e) = move_recording_file(&preview_path, &destination).await {
+                    error!(?preview_path, ?destination, "failed to save recording: {e}");
+                    if let Ok(mut s) = state.lock() {
+                        s.recording_status = RecordingStatus::Previewing;
+                        s.last_error = Some(e);
+                    }
+                    continue;
+                }
+
+                if let Some(parent) = destination.parent()
+                    && let Ok(mut s) = state.lock()
+                {
+                    s.settings.output_dir = parent.to_path_buf();
+                    if let Err(e) = save_settings(&s.settings) {
+                        warn!("failed to persist updated output_dir: {e}");
+                    }
+                }
+
+                if let Ok(mut s) = state.lock() {
+                    s.preview_path = None;
+                    s.recording_status = RecordingStatus::Idle;
+                    s.last_error = None;
+                    s.success_toast = Some((
+                        format!("Saved recording to {}", destination.display()),
+                        Instant::now(),
+                    ));
+                    info!(?destination, "recording saved and returned to Idle");
                 }
             }
 
@@ -474,4 +555,28 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
     }
 
     info!("command_loop exited — channel closed");
+}
+
+async fn move_recording_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), AppError> {
+    if let Some(parent) = dst.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    match tokio::fs::rename(src, dst).await {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // Cross-volume moves can fail with EXDEV. Fallback to copy+remove.
+            match tokio::fs::copy(src, dst).await {
+                Ok(_) => {
+                    tokio::fs::remove_file(src).await?;
+                    Ok(())
+                }
+                Err(copy_err) => Err(AppError::Io {
+                    source: std::io::Error::other(format!(
+                        "rename failed: {rename_err}; copy fallback failed: {copy_err}"
+                    )),
+                }),
+            }
+        }
+    }
 }

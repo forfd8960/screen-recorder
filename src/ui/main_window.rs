@@ -38,6 +38,8 @@ pub fn show(ctx: &egui::Context, state: &AppState, cmd_tx: &UnboundedSender<Reco
             render_error(ui, err, cmd_tx);
         }
     });
+
+    render_success_toast(ctx, state);
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +164,38 @@ fn render_error(ui: &mut Ui, err: &AppError, cmd_tx: &UnboundedSender<RecorderCo
     } else {
         ui.colored_label(Color32::from_rgb(220, 100, 60), format!("⚠ {err}"));
     }
+}
+
+fn render_success_toast(ctx: &egui::Context, state: &AppState) {
+    const TOAST_DURATION_SECS: f32 = 3.0;
+
+    let Some((message, shown_at)) = &state.success_toast else {
+        return;
+    };
+
+    if shown_at.elapsed().as_secs_f32() > TOAST_DURATION_SECS {
+        return;
+    }
+
+    // Keep repainting while the toast is visible so it can auto-expire.
+    ctx.request_repaint_after(Duration::from_millis(100));
+
+    egui::Area::new("save_success_toast".into())
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(Color32::from_rgb(40, 150, 70))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(12_i8, 8_i8))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!("✓ {message}"))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    );
+                });
+        });
 }
 
 /// Opens the Screen Recording privacy pane in System Settings.
