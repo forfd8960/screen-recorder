@@ -20,6 +20,7 @@ macos_minimum_system_version = "12.3"
 screencapturekit    = "1"          # was spec "0.3"; current latest: 1.5.1
 block2              = "0.6"        # ObjC blocks; must match objc2-av-foundation's dep
 objc2               = "0.6"        # was spec "0.5"; current latest: 0.6.4
+objc2-app-kit       = { version = "0.3", features = ["NSEvent"] }
 objc2-av-foundation = { version = "0.3", features = [
     "AVAssetWriter",
     "AVAssetWriterInput",
