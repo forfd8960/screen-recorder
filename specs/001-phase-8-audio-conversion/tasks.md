@@ -201,13 +201,13 @@ Must be 100% complete before any user story phase starts.
 
 ### Tests for User Story 7 (REQUIRED) ⚠️
 
-- [ ] T063 [P] [US7] Write unit test in `src/app.rs`: `handle_command(RecorderCommand::Start)` when status is `Idle` calls `orchestrator.start()`; `handle_command(RecorderCommand::Stop)` when status is `Recording` calls `orchestrator.stop()`; both are no-ops in incorrect states
+- [X] T063 [P] [US7] Write unit test in `src/app.rs`: `handle_command(RecorderCommand::Start)` when status is `Idle` calls `orchestrator.start()`; `handle_command(RecorderCommand::Stop)` when status is `Recording` calls `orchestrator.stop()`; both are no-ops in incorrect states
 
 ### Implementation for User Story 7
 
-- [ ] T064 [US7] Register global event monitor in `src/capture/engine.rs`'s `start()` via `NSEvent::addGlobalMonitorForEvents(matching: .keyDown)` using `objc2`; detect `⌘⇧R` → send `RecorderCommand::Start`; detect `⌘⇧S` → send `RecorderCommand::Stop`; store monitor reference, remove on `stop()`
-- [ ] T065 [US7] Register app-local shortcuts in `src/app.rs` egui update loop via `ctx.input_mut`: `⌘⇧R` and `⌘⇧S` map to the same `RecorderCommand`s as global shortcuts; ensures shortcuts work when app is in focus without global monitor
-- [ ] T066 [US7] Document shortcut registration cleanup: assert global monitor `removeMonitor` is called when `CaptureEngine` is dropped (implement in `Drop` impl of `CaptureEngine`)
+- [X] T064 [US7] Register global event monitor in `src/capture/engine.rs`'s `start()` via `NSEvent::addGlobalMonitorForEvents(matching: .keyDown)` using `objc2`; detect `⌘⇧R` → send `RecorderCommand::Start`; detect `⌘⇧S` → send `RecorderCommand::Stop`; store monitor reference, remove on `stop()`
+- [X] T065 [US7] Register app-local shortcuts in `src/app.rs` egui update loop via `ctx.input_mut`: `⌘⇧R` and `⌘⇧S` map to the same `RecorderCommand`s as global shortcuts; ensures shortcuts work when app is in focus without global monitor
+- [X] T066 [US7] Document shortcut registration cleanup: assert global monitor `removeMonitor` is called when `CaptureEngine` is dropped (implement in `Drop` impl of `CaptureEngine`)
 
 **Checkpoint**: Recording starts and stops via keyboard while app is in background; no duplicate events fired when app is in foreground.
 

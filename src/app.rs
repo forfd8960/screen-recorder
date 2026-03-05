@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::{
     capture::{
         content_filter::{DisplayInfo, WindowInfo},
-        engine::CaptureEngine,
+        engine::{CaptureEngine, register_global_shortcut_sender},
         permissions::{check_mic_permission, check_screen_permission},
     },
     config::settings::{RecordingSettings, Resolution, VideoQuality, load_settings, save_settings},
@@ -62,6 +62,16 @@ impl RecordingStatus {
     pub const fn is_idle(&self) -> bool {
         matches!(self, Self::Idle)
     }
+}
+
+#[must_use]
+fn can_handle_start(orch_active: bool, status: &RecordingStatus) -> bool {
+    !orch_active && status.is_idle()
+}
+
+#[must_use]
+fn can_handle_stop(orch_active: bool, status: &RecordingStatus) -> bool {
+    orch_active && status.is_recording()
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +227,7 @@ impl App {
         }));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        register_global_shortcut_sender(cmd_tx.clone());
 
         let state_clone = Arc::clone(&state);
         rt.spawn(command_loop(state_clone, cmd_rx));
@@ -228,6 +239,16 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Ok(state) = self.state.lock() {
+            // T065 – app-local start/stop shortcuts (⌘⇧R / ⌘⇧S)
+            ctx.input(|i| {
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::R) {
+                    let _ = self.cmd_tx.send(RecorderCommand::Start);
+                }
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::S) {
+                    let _ = self.cmd_tx.send(RecorderCommand::Stop);
+                }
+            });
+
             // T050 – preview keyboard shortcuts (⌘ Return / ⌘ ⌫)
             if matches!(state.recording_status, RecordingStatus::Previewing) {
                 ctx.input(|i| {
@@ -322,7 +343,14 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
 
         match cmd {
             RecorderCommand::Start => {
-                if orch.is_some() {
+                let status_snapshot = if let Ok(s) = state.lock() {
+                    s.recording_status.clone()
+                } else {
+                    error!("AppState poisoned — cannot evaluate Start command");
+                    continue;
+                };
+
+                if !can_handle_start(orch.is_some(), &status_snapshot) {
                     warn!("Start command received while already recording — ignoring");
                     continue;
                 }
@@ -372,6 +400,18 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
             }
 
             RecorderCommand::Stop => {
+                let status_snapshot = if let Ok(s) = state.lock() {
+                    s.recording_status.clone()
+                } else {
+                    error!("AppState poisoned — cannot evaluate Stop command");
+                    continue;
+                };
+
+                if !can_handle_stop(orch.is_some(), &status_snapshot) {
+                    warn!("Stop command received while not recording — ignoring");
+                    continue;
+                }
+
                 if let Some(active_orch) = orch.take() {
                     match active_orch.stop().await {
                         Ok(path) => {
@@ -389,8 +429,6 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
                             }
                         }
                     }
-                } else {
-                    warn!("Stop command received while not recording — ignoring");
                 }
             }
 
@@ -625,4 +663,33 @@ async fn command_loop(state: Arc<Mutex<AppState>>, mut rx: UnboundedReceiver<Rec
     }
 
     info!("command_loop exited — channel closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_allowed_only_when_idle_and_orchestrator_absent() {
+        assert!(can_handle_start(false, &RecordingStatus::Idle));
+        assert!(!can_handle_start(true, &RecordingStatus::Idle));
+        assert!(!can_handle_start(
+            false,
+            &RecordingStatus::Recording {
+                started_at: Instant::now()
+            }
+        ));
+    }
+
+    #[test]
+    fn stop_allowed_only_when_recording_and_orchestrator_present() {
+        assert!(can_handle_stop(
+            true,
+            &RecordingStatus::Recording {
+                started_at: Instant::now()
+            }
+        ));
+        assert!(!can_handle_stop(false, &RecordingStatus::Idle));
+        assert!(!can_handle_stop(true, &RecordingStatus::Idle));
+    }
 }

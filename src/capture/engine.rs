@@ -25,6 +25,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::{ptr::NonNull, sync::OnceLock};
+
+use objc2::{rc::Retained, runtime::AnyObject};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
 
 use screencapturekit::{
     CMSampleBuffer,
@@ -39,6 +43,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
+    app::RecorderCommand,
     capture::{audio::audio_capture_params, content_filter},
     config::settings::{RecordingSettings, Resolution},
     error::AppError,
@@ -47,6 +52,41 @@ use crate::{
 // Channel capacity: buffer ~4 seconds at 60 fps (video) or ~90 s at 100 pkt/s
 // (audio) to absorb bursts while AVAssetWriter initialises on first start.
 const CHANNEL_CAPACITY: usize = 480;
+
+static GLOBAL_SHORTCUT_TX: OnceLock<mpsc::UnboundedSender<RecorderCommand>> = OnceLock::new();
+
+struct GlobalMonitorToken(Retained<AnyObject>);
+
+// SAFETY: This is an opaque AppKit token passed back only to
+// `NSEvent::removeMonitor` during cleanup.
+unsafe impl Send for GlobalMonitorToken {}
+
+pub fn register_global_shortcut_sender(tx: mpsc::UnboundedSender<RecorderCommand>) {
+    let _ = GLOBAL_SHORTCUT_TX.set(tx);
+}
+
+fn shortcut_command_from_key(
+    modifiers: NSEventModifierFlags,
+    key: &str,
+) -> Option<RecorderCommand> {
+    if !modifiers.contains(NSEventModifierFlags::Command)
+        || !modifiers.contains(NSEventModifierFlags::Shift)
+    {
+        return None;
+    }
+
+    match key.to_ascii_lowercase().as_str() {
+        "r" => Some(RecorderCommand::Start),
+        "s" => Some(RecorderCommand::Stop),
+        _ => None,
+    }
+}
+
+unsafe fn shortcut_command_from_event(event: &NSEvent) -> Option<RecorderCommand> {
+    let modifiers = event.modifierFlags();
+    let chars = event.charactersIgnoringModifiers()?;
+    shortcut_command_from_key(modifiers, &chars.to_string())
+}
 
 fn scaled_output_dimensions(
     capture_width: u32,
@@ -173,6 +213,8 @@ pub struct CaptureEngine {
     audio_tx: Option<mpsc::Sender<CMSampleBuffer>>,
     /// Cumulative number of frames dropped due to a full channel.
     pub frames_dropped: Arc<AtomicU64>,
+    /// AppKit global key monitor token (if registered).
+    global_key_monitor: Option<GlobalMonitorToken>,
 }
 
 impl CaptureEngine {
@@ -194,6 +236,7 @@ impl CaptureEngine {
             video_tx: Some(video_tx),
             audio_tx: Some(audio_tx),
             frames_dropped: Arc::new(AtomicU64::new(0)),
+            global_key_monitor: None,
         };
         (engine, video_rx, audio_rx)
     }
@@ -243,8 +286,8 @@ impl CaptureEngine {
         let frames_dropped = Arc::clone(&self.frames_dropped);
 
         // All blocking FFI calls are offloaded to a dedicated OS thread.
-        let stream =
-            tokio::task::spawn_blocking(move || -> Result<(SCStream, u32, u32), AppError> {
+        let stream = tokio::task::spawn_blocking(
+            move || -> Result<(SCStream, u32, u32, Option<GlobalMonitorToken>), AppError> {
                 // -----------------------------------------------------------------
                 // 1. Build content filter and resolve capture dimensions.
                 //    T041: delegate to `content_filter::build_filter` which
@@ -258,6 +301,30 @@ impl CaptureEngine {
                 let config = build_stream_config(&settings_clone, width, height);
                 let output_width = config.width();
                 let output_height = config.height();
+
+                // -----------------------------------------------------------------
+                // 2b. Register global keyboard monitor (⌘⇧R / ⌘⇧S).
+                // -----------------------------------------------------------------
+                let global_key_monitor = if let Some(tx) = GLOBAL_SHORTCUT_TX.get().cloned() {
+                    let handler = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
+                        // SAFETY: pointer is provided by AppKit callback for
+                        // this invocation and valid for the closure duration.
+                        let event = unsafe { event_ptr.as_ref() };
+                        // SAFETY: event originates from AppKit and exposes a
+                        // valid key-event API on this callback path.
+                        if let Some(cmd) = unsafe { shortcut_command_from_event(event) } {
+                            let _ = tx.send(cmd);
+                        }
+                    });
+
+                    NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+                        NSEventMask::KeyDown,
+                        &handler,
+                    )
+                    .map(GlobalMonitorToken)
+                } else {
+                    None
+                };
 
                 // -----------------------------------------------------------------
                 // 3. Create SCStream and register output handlers.
@@ -293,13 +360,15 @@ impl CaptureEngine {
                     capture_audio,
                     "SCStream started"
                 );
-                Ok((stream, output_width, output_height))
-            })
-            .await
-            .map_err(|e| AppError::StreamCreation(format!("spawn_blocking join: {e}")))??;
+                Ok((stream, output_width, output_height, global_key_monitor))
+            },
+        )
+        .await
+        .map_err(|e| AppError::StreamCreation(format!("spawn_blocking join: {e}")))??;
 
-        let (stream, actual_w, actual_h) = stream;
+        let (stream, actual_w, actual_h, global_key_monitor) = stream;
         self.stream = Some(stream);
+        self.global_key_monitor = global_key_monitor;
         Ok((actual_w, actual_h))
     }
 
@@ -329,6 +398,11 @@ impl CaptureEngine {
             info!("SCStream stopped");
         }
 
+        if let Some(monitor) = self.global_key_monitor.take() {
+            // SAFETY: monitor token returned by AppKit addGlobalMonitor API.
+            unsafe { NSEvent::removeMonitor(&monitor.0) };
+        }
+
         Ok(())
     }
 
@@ -344,6 +418,15 @@ impl Default for CaptureEngine {
     fn default() -> Self {
         let (engine, _vr, _ar) = Self::new();
         engine
+    }
+}
+
+impl Drop for CaptureEngine {
+    fn drop(&mut self) {
+        if let Some(monitor) = self.global_key_monitor.take() {
+            // SAFETY: monitor token returned by AppKit addGlobalMonitor API.
+            unsafe { NSEvent::removeMonitor(&monitor.0) };
+        }
     }
 }
 
@@ -408,5 +491,27 @@ mod tests {
 
         assert_eq!(VideoQuality::Medium.bitrate_bps(), 4_000_000);
         assert_eq!(VideoQuality::High.bitrate_bps(), 8_000_000);
+    }
+
+    #[test]
+    fn shortcut_parser_maps_cmd_shift_r_s() {
+        assert_eq!(
+            shortcut_command_from_key(
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                "r"
+            ),
+            Some(RecorderCommand::Start)
+        );
+        assert_eq!(
+            shortcut_command_from_key(
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                "s"
+            ),
+            Some(RecorderCommand::Stop)
+        );
+        assert_eq!(
+            shortcut_command_from_key(NSEventModifierFlags::Command, "r"),
+            None
+        );
     }
 }
