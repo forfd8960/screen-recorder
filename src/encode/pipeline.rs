@@ -219,22 +219,29 @@ fn run_encoding_thread(
 
             // --- Wait for next video frame (blocking) ---
             if let Some(vb) = video_rx.blocking_recv() {
-                if video_input.isReadyForMoreMediaData()
-                    && let Some(retained) = sc_buf_to_retained(&vb)
-                {
-                    // Anchor the writing session to the first frame's real
-                    // presentation timestamp.  SCKit delivers wall-clock CMTimes;
-                    // using time_zero (0 s) creates a timestamp mismatch that
-                    // causes AVFoundation to reject every buffer (-11800).
-                    if !session_started {
-                        let first_pts = retained.presentation_time_stamp();
-                        writer.startSessionAtSourceTime(first_pts);
-                        session_started = true;
-                    }
+                // sc_buf_to_retained may return None if the underlying
+                // CMSampleBufferRef is null or already invalid.
+                let Some(retained) = sc_buf_to_retained(&vb) else {
+                    continue;
+                };
+
+                // Anchor the writing session to the first frame's real
+                // presentation timestamp.  This must happen BEFORE the first
+                // appendSampleBuffer call and independently of
+                // isReadyForMoreMediaData: gating it on readiness means the
+                // session is never started when the encoder is still warming
+                // up, causing finishWritingWithCompletionHandler to fail with
+                // AVErrorUnknown (-11800).
+                if !session_started {
+                    let first_pts = retained.presentation_time_stamp();
+                    writer.startSessionAtSourceTime(first_pts);
+                    session_started = true;
+                }
+
+                if video_input.isReadyForMoreMediaData() {
                     frame_count += 1;
                     if !video_input.appendSampleBuffer(&retained) {
-                        // Writer entered a failed state; check error via writer
-                        // after the loop exits.
+                        // Writer entered a failed state; surface error below.
                         warn!(
                             frame_count,
                             "appendSampleBuffer returned false — breaking write loop"
@@ -260,6 +267,16 @@ fn run_encoding_thread(
         // ---------------------------------------------------------------- //
         // 7.  Finalize                                                      //
         // ---------------------------------------------------------------- //
+
+        // Guard: if no valid frames were ever received (e.g. the channel was
+        // closed before any CMSampleBuffer could be retained) the session was
+        // never started.  finishWritingWithCompletionHandler on an unstarted
+        // writer produces AVErrorUnknown (-11800), so fail fast instead.
+        if !session_started {
+            return Err(AppError::EncodingError(
+                "no video frames were written — recording session was never started".into(),
+            ));
+        }
         video_input.markAsFinished();
 
         // Use the non-deprecated async completion-handler API so that

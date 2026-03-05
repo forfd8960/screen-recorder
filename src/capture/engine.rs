@@ -42,9 +42,9 @@ use crate::{
     error::AppError,
 };
 
-// Channel capacity: enough to buffer ~2 seconds of 60 fps video without
-// back-pressure, while bounding memory usage.
-const CHANNEL_CAPACITY: usize = 120;
+// Channel capacity: buffer ~4 seconds at 60 fps (video) or ~90 s at 100 pkt/s
+// (audio) to absorb bursts while AVAssetWriter initialises on first start.
+const CHANNEL_CAPACITY: usize = 480;
 
 // ---------------------------------------------------------------------------
 // ChannelHandler
