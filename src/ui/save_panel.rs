@@ -24,8 +24,11 @@ pub fn show(ctx: &egui::Context, state: &AppState, cmd_tx: &UnboundedSender<Reco
         ui.add_space(8.0);
 
         ui.label(
-            RichText::new(format!("Output folder: {}", state.settings.output_dir.display()))
-                .color(Color32::GRAY),
+            RichText::new(format!(
+                "Output folder: {}",
+                state.settings.output_dir.display()
+            ))
+            .color(Color32::GRAY),
         );
 
         ui.add_space(10.0);
