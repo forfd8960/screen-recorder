@@ -30,9 +30,11 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
     AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor, AVAssetWriterStatus,
-    AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey, AVVideoCodecKey,
-    AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoWidthKey,
+    AVFileTypeMPEG4, AVMediaTypeAudio, AVMediaTypeVideo, AVVideoAverageBitRateKey,
+    AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoHeightKey,
+    AVVideoWidthKey,
 };
+use objc2_core_media::CMSampleBuffer as ObjcCMSampleBuffer;
 use objc2_core_video::CVPixelBuffer as ObjcCVPixelBuffer;
 use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
 use tokio::sync::{mpsc, oneshot};
@@ -86,6 +88,7 @@ impl EncodingPipeline {
         let output_path = temp.path().to_path_buf();
 
         let bitrate = bitrate_for_quality(settings.quality);
+        let capture_audio = settings.capture_mic;
         // `width` and `height` are provided by the caller (from CaptureEngine::start)
         // and are guaranteed to be the actual SCStream dimensions — never zero.
         let (result_tx, result_rx) = oneshot::channel::<Result<PathBuf, AppError>>();
@@ -93,8 +96,15 @@ impl EncodingPipeline {
         let task = tokio::task::spawn_blocking(move || {
             // `temp` is moved into this closure — it will be kept (via keep())
             // on success or deleted on drop on failure.
-            let outcome =
-                run_encoding_thread(&output_path, video_rx, audio_rx, width, height, bitrate);
+            let outcome = run_encoding_thread(
+                &output_path,
+                video_rx,
+                audio_rx,
+                width,
+                height,
+                bitrate,
+                capture_audio,
+            );
 
             if outcome.is_ok() {
                 // Prevent TempFile from deleting the output file.
@@ -148,6 +158,7 @@ fn run_encoding_thread(
     width: u32,
     height: u32,
     bitrate: u32,
+    capture_audio: bool,
 ) -> Result<PathBuf, AppError> {
     unsafe {
         // ---------------------------------------------------------------- //
@@ -201,22 +212,21 @@ fn run_encoding_thread(
                 );
 
         // ---------------------------------------------------------------- //
-        // 4.  Audio NOTE — not added to writer in this phase.
-        //
-        //     ScreenCaptureKit delivers audio as LPCM Float32 Non-Interleaved.
-        //     AVAssetWriterInput for AAC compression requires interleaved input
-        //     or a specific format description that matches the encoder's
-        //     expectations.  Passing the SCKit CMSampleBuffer directly to
-        //     appendSampleBuffer throws NSInvalidArgumentException.
-        //
-        //     Using outputSettings=nil (passthrough) also fails because the MP4
-        //     container does not support raw LPCM audio tracks.
-        //
-        //     Proper LPCM→AAC conversion via AudioConverter will be implemented
-        //     in Phase 8.  Until then, the encoder is video-only and audio
-        //     buffers received from the capture engine are drained and discarded.
+        // 4.  Audio input (AAC)                                            //
         // ---------------------------------------------------------------- //
-        // NOTE: audio input not added — see Phase 8 comment above.
+        let audio_input = if capture_audio {
+            let audio_settings = build_audio_settings();
+            let media_audio = AVMediaTypeAudio.expect("AVMediaTypeAudio must exist");
+            let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                media_audio,
+                Some(&*audio_settings),
+            );
+            input.setExpectsMediaDataInRealTime(true);
+            writer.addInput(&input);
+            Some(input)
+        } else {
+            None
+        };
 
         // ---------------------------------------------------------------- //
         // 5.  Start writing                                                 //
@@ -242,83 +252,95 @@ fn run_encoding_thread(
         // would itself fail with AVErrorUnknown (-11800) on a Failed writer.
         let mut append_failed = false;
 
-        loop {
-            // --- Drain (and discard) audio channel ---
-            while audio_rx.try_recv().is_ok() {
-                // Audio buffers discarded until Phase 8 LPCM→AAC converter.
-            }
+        let mut audio_frames = 0u64;
+        let mut video_closed = false;
+        let mut audio_closed = !capture_audio;
 
-            // --- Wait for next video frame (blocking) ---
-            if let Some(vb) = video_rx.blocking_recv() {
-                // Extract the raw CVPixelBuffer and the presentation timestamp
-                // from the screencapturekit CMSampleBuffer.  We bypass
-                // appendSampleBuffer entirely to avoid the SCKit-specific
-                // metadata extensions that cause AVErrorUnknown (-11800).
-                let sc_pts = vb.presentation_timestamp();
-                let pts_value = sc_pts.value;
-                let pts_timescale = sc_pts.timescale;
+        tokio::runtime::Handle::current().block_on(async {
+            while !(video_closed && audio_closed) {
+                tokio::select! {
+                    maybe_vb = video_rx.recv(), if !video_closed => {
+                        let Some(vb) = maybe_vb else {
+                            video_closed = true;
+                            continue;
+                        };
 
-                // Build a CMTime compatible with objc2_core_media.
-                let pts = objc2_core_media::CMTime {
-                    value: pts_value,
-                    timescale: pts_timescale,
-                    flags: objc2_core_media::CMTimeFlags(1), // kCMTimeFlags_Valid
-                    epoch: 0,
-                };
+                        let pts = sc_time_to_cm(vb.presentation_timestamp());
 
-                // Anchor the writing session to the first frame's real PTS.
-                // Must happen BEFORE the first appendPixelBuffer call.
-                if !session_started {
-                    writer.startSessionAtSourceTime(pts);
-                    session_started = true;
-                }
+                        if !session_started {
+                            writer.startSessionAtSourceTime(pts);
+                            session_started = true;
+                        }
 
-                // Get the CVPixelBuffer from the screencapturekit CMSampleBuffer.
-                let Some(sc_pixel_buf) = vb.image_buffer() else {
-                    // Frame has no pixel data (e.g. status-only frame) — skip.
-                    continue;
-                };
+                        let Some(sc_pixel_buf) = vb.image_buffer() else {
+                            continue;
+                        };
 
-                // Toll-free bridge: screencapturekit's CVPixelBuffer is the
-                // same CF object as objc2_core_video::CVPixelBuffer.  We
-                // retain to keep the buffer alive for the duration of this
-                // call, balancing screencapturekit's own retain on the buffer.
-                let Some(retained_pix) = sc_pixel_buf_to_objc(&sc_pixel_buf) else {
-                    continue;
-                };
+                        let Some(retained_pix) = sc_pixel_buf_to_objc(&sc_pixel_buf) else {
+                            continue;
+                        };
 
-                if video_input.isReadyForMoreMediaData() {
-                    frame_count += 1;
-                    if !adaptor.appendPixelBuffer_withPresentationTime(&retained_pix, pts) {
-                        // Writer entered a failed state.  Log the underlying
-                        // AVFoundation error before breaking so we have full
-                        // context in the log.
-                        let writer_err = writer
-                            .error()
-                            .map(|e| format!("{e:?}"))
-                            .unwrap_or_else(|| format!("status={}", writer.status().0));
-                        warn!(
-                            frame_count,
-                            writer_err,
-                            "appendPixelBuffer returned false — writer entered failed state"
-                        );
-                        append_failed = true;
-                        break;
+                        if video_input.isReadyForMoreMediaData() {
+                            frame_count += 1;
+                            if !adaptor.appendPixelBuffer_withPresentationTime(&retained_pix, pts) {
+                                let writer_err = writer
+                                    .error()
+                                    .map(|e| format!("{e:?}"))
+                                    .unwrap_or_else(|| format!("status={}", writer.status().0));
+                                warn!(
+                                    frame_count,
+                                    writer_err,
+                                    "appendPixelBuffer returned false — writer entered failed state"
+                                );
+                                append_failed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    maybe_ab = audio_rx.recv(), if !audio_closed => {
+                        let Some(ab) = maybe_ab else {
+                            audio_closed = true;
+                            continue;
+                        };
+
+                        let Some(input) = audio_input.as_ref() else {
+                            continue;
+                        };
+
+                        let pts = sc_time_to_cm(ab.presentation_timestamp());
+                        if !session_started {
+                            writer.startSessionAtSourceTime(pts);
+                            session_started = true;
+                        }
+
+                        if input.isReadyForMoreMediaData() {
+                            audio_frames += 1;
+                            let Some(retained_sample) = sc_sample_buf_to_objc(&ab) else {
+                                continue;
+                            };
+
+                            if !input.appendSampleBuffer(&retained_sample) {
+                                let writer_err = writer
+                                    .error()
+                                    .map(|e| format!("{e:?}"))
+                                    .unwrap_or_else(|| format!("status={}", writer.status().0));
+                                warn!(audio_frames, writer_err, "appendSampleBuffer(audio) returned false");
+                                append_failed = true;
+                                break;
+                            }
+                        }
                     }
                 }
-            } else {
-                // All video senders disconnected → stop recording.
-                info!(
-                    frame_count,
-                    "video channel disconnected — finalizing output"
-                );
-                break;
             }
+        });
+
+        if video_closed {
+            info!(frame_count, audio_frames, "channels disconnected — finalizing output");
         }
 
-        // Drain any remaining audio after the video loop exits.
-        while audio_rx.try_recv().is_ok() {
-            // discard
+        if append_failed {
+            // continue to common finalize path below (will cancel writer)
         }
 
         // ---------------------------------------------------------------- //
@@ -357,6 +379,9 @@ fn run_encoding_thread(
         }
 
         video_input.markAsFinished();
+        if let Some(input) = audio_input.as_ref() {
+            input.markAsFinished();
+        }
 
         // Use the non-deprecated async completion-handler API so that
         // finishWriting works correctly on all supported macOS versions.
@@ -422,6 +447,43 @@ unsafe fn sc_pixel_buf_to_objc(
     let raw = sc_pix.as_ptr().cast::<ObjcCVPixelBuffer>();
     // SAFETY: raw is non-null when screencapturekit delivers a valid pixel buffer.
     Retained::retain(raw)
+}
+
+unsafe fn sc_sample_buf_to_objc(
+    sample: &screencapturekit::cm::CMSampleBuffer,
+) -> Option<Retained<ObjcCMSampleBuffer>> {
+    let raw = sample.as_ptr().cast::<ObjcCMSampleBuffer>();
+    Retained::retain(raw)
+}
+
+fn sc_time_to_cm(sc_time: screencapturekit::cm::CMTime) -> objc2_core_media::CMTime {
+    objc2_core_media::CMTime {
+        value: sc_time.value,
+        timescale: sc_time.timescale,
+        flags: objc2_core_media::CMTimeFlags(1),
+        epoch: 0,
+    }
+}
+
+unsafe fn build_audio_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
+    let dict = NSMutableDictionary::<NSString, AnyObject>::new();
+
+    let format_id_key = NSString::from_str("AVFormatIDKey");
+    let sample_rate_key = NSString::from_str("AVSampleRateKey");
+    let channels_key = NSString::from_str("AVNumberOfChannelsKey");
+    let bitrate_key = NSString::from_str("AVEncoderBitRateKey");
+
+    let format_id = NSNumber::new_u32(0x6161_6320); // kAudioFormatMPEG4AAC
+    let sample_rate = NSNumber::new_u32(48_000);
+    let channels = NSNumber::new_u32(2);
+    let bitrate = NSNumber::new_u32(128_000);
+
+    dict.insert(&*format_id_key, &*format_id);
+    dict.insert(&*sample_rate_key, &*sample_rate);
+    dict.insert(&*channels_key, &*channels);
+    dict.insert(&*bitrate_key, &*bitrate);
+
+    dict
 }
 
 /// Builds the H.264 / `VideoToolbox` settings dictionary:
