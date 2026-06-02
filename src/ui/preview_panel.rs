@@ -77,11 +77,11 @@ pub fn show(ctx: &egui::Context, state: &AppState, cmd_tx: &UnboundedSender<Reco
                 ui.add_space(16.0);
 
                 ui.horizontal(|ui| {
-                    let btn_width = 180.0;
+                    let btn_width = 130.0;
 
                     // Accept button.
                     let accept = egui::Button::new(
-                        RichText::new("✓  Accept  (⌘ ↩)").color(Color32::from_rgb(255, 255, 255)),
+                        RichText::new("√ Accept  (⌘ ↩)").color(Color32::from_rgb(255, 255, 255)),
                     )
                     .fill(Color32::from_rgb(30, 140, 30))
                     .min_size(egui::vec2(btn_width, 36.0));
@@ -109,7 +109,7 @@ pub fn show(ctx: &egui::Context, state: &AppState, cmd_tx: &UnboundedSender<Reco
                 ui.label(
                     RichText::new(
                         "Accept — save recording to output folder   ·   \
-                         Discard — permanently delete temp file",
+                            Discard — permanently delete temp file",
                     )
                     .color(Color32::GRAY)
                     .small(),
